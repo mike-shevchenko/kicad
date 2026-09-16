@@ -3,6 +3,7 @@
 
 import argparse
 import math
+import os
 import re
 import shutil
 import sys
@@ -16,6 +17,21 @@ without the board placement's rotation or flip) are added to the sheet as
 schematic graphics at the same millimetre scale, with the pad numbers as
 small text. A shared letter prefix within a row is factored out into one
 label at the left of that row.
+
+A REF may instead be a description of a connector to draw from scratch:
+
+  (rect NAME
+    (outer W H (top_notches (xwh X W H) ...)? (bottom_notches ...)?)
+    (inner W H ... (offset X Y)?)?
+    (pins PITCH (row NAME ...) ... (offset X Y)?)?)
+
+Coordinates start at the top-left corner, as on the board. A notch of
+height H steps down into the shape; a negative height steps up. A notch
+touching the left or right end of its edge has no vertical line there.
+The inner outline is centred in the outer one, and the pins are centred
+in the inner outline (or the outer one, if there is no inner), ignoring
+the notches. Either can be shifted from there with (offset X Y); moving
+the inner outline moves the pins with it.
 
 The sheet is rewritten in place; the previous contents are kept as
 sheet.kicad_sch.BAK.
@@ -113,6 +129,229 @@ def off_page(sheet, height):
     return w + 20, top + height / 2
 
 
+EPS = 1e-6
+
+
+def sexpr(text):
+    """Parse a parenthesised expression into nested lists of strings."""
+    tokens = re.findall(r'\(|\)|[^\s()]+', text)
+    stack, cur = [], []
+    for t in tokens:
+        if t == '(':
+            stack.append(cur)
+            cur = []
+        elif t == ')':
+            if not stack:
+                sys.exit("spec: too many closing parentheses")
+            parent = stack.pop()
+            parent.append(cur)
+            cur = parent
+        else:
+            cur.append(t)
+    if stack:
+        sys.exit("spec: missing closing parenthesis")
+    if len(cur) != 1:
+        sys.exit("spec: expected exactly one top-level form")
+    return cur[0]
+
+
+def take(form, tag):
+    """The first sub-form with this tag, or None."""
+    for item in form:
+        if isinstance(item, list) and item and item[0] == tag:
+            return item
+    return None
+
+
+def notches_of(form, tag):
+    """[(x, w, h), ...] from a (top_notches (xwh ...) ...) sub-form."""
+    block = take(form, tag)
+    if not block:
+        return []
+    out = []
+    for item in block[1:]:
+        if not (isinstance(item, list) and item and item[0] == "xwh"):
+            sys.exit(f"spec: {tag} takes (xwh X W H) items")
+        x, w, h = (float(v) for v in item[1:4])
+        out.append((x, w, h))
+    return out
+
+
+def edge_path(width, y, notches):
+    """One horizontal edge, left to right, with its notches.
+
+    A notch of height h steps to y + h; negative h steps the other way.
+    A notch touching the left or right end of the edge has no vertical
+    line on that side.
+    """
+    if not notches:
+        return [(0.0, y), (width, y)]
+
+    pts = []
+    cur = 0.0
+    for i, (x, w, h) in enumerate(sorted(notches)):
+        if i == 0 and abs(x) < EPS:
+            pts.append((0.0, y + h))            # starts on the left edge
+        else:
+            if i == 0:
+                pts.append((0.0, y))
+            pts.append((x, y))
+            pts.append((x, y + h))
+        pts.append((x + w, y + h))
+        if abs((x + w) - width) > EPS:
+            pts.append((x + w, y))
+        cur = x + w
+    if abs(cur - width) > EPS:
+        pts.append((width, y))
+    return pts
+
+
+def rect_outline(form):
+    """A closed polyline for an (outer ...) or (inner ...) form."""
+    w, h = float(form[1]), float(form[2])
+    top = edge_path(w, 0.0, notches_of(form, "top_notches"))
+    bottom = edge_path(w, h, notches_of(form, "bottom_notches"))
+    pts = top + list(reversed(bottom))
+    pts.append(pts[0])
+    return (w, h), pts
+
+
+def spec_picture(text):
+    """(title, shapes, pads) for a (rect NAME ...) description."""
+    form = sexpr(text)
+    if not form or form[0] != "rect":
+        sys.exit("spec: expected (rect NAME ...)")
+    title = form[1]
+
+    outer = take(form, "outer")
+    if not outer:
+        sys.exit("spec: (outer W H ...) is required")
+    (ow, oh), opts = rect_outline(outer)
+    shapes = [("fp_poly", opts)]
+
+    ref_w, ref_h, ref_x, ref_y = ow, oh, 0.0, 0.0
+    inner = take(form, "inner")
+    if inner:
+        (iw, ih), ipts = rect_outline(inner)
+        dx, dy = (ow - iw) / 2, (oh - ih) / 2      # centred in the outer
+        off = take(inner, "offset")
+        if off:
+            dx += float(off[1])
+            dy += float(off[2])
+        shapes.append(("fp_poly", [(x + dx, y + dy) for x, y in ipts]))
+        ref_w, ref_h, ref_x, ref_y = iw, ih, dx, dy
+
+    pads = []
+    pins = take(form, "pins")
+    if pins:
+        pitch = float(pins[1])
+        rows = [item[1:] for item in pins[2:]
+                if isinstance(item, list) and item and item[0] == "row"]
+        if not rows:
+            sys.exit("spec: (pins PITCH (row ...) ...) needs at least one row")
+        cols = max(len(r) for r in rows)
+        bw, bh = (cols - 1) * pitch, (len(rows) - 1) * pitch
+        x0 = ref_x + (ref_w - bw) / 2
+        y0 = ref_y + (ref_h - bh) / 2
+        off = take(pins, "offset")
+        if off:
+            x0 += float(off[1])
+            y0 += float(off[2])
+        for r, names in enumerate(rows):
+            for c, name in enumerate(names):
+                pads.append((name, x0 + c * pitch, y0 + r * pitch, 0.0, 0.0, False))
+
+    return title, shapes, pads, (ref_x, ref_y, ref_w, ref_h)
+
+
+
+PAD_SIZE = 1.7          # a typical 2.54 mm pin header pad
+PAD_DRILL = 1.0
+PAD_RRATIO = 0.25       # roundrect corner ratio for pin 1
+
+
+def is_first_pin(name):
+    """True for pin 1 of a row: "1", "A1", "XY1" — any non-digit prefix."""
+    return re.fullmatch(r'\D*1', name) is not None
+
+
+def write_footprint(title, shapes, pads, rect, path):
+    """Write a .kicad_mod with the outline on F.SilkS and through-hole pads."""
+    ox, oy = (pads[0][1], pads[0][2]) if pads else (0.0, 0.0)   # origin on pin 1
+    rx, ry, rw, rh = rect
+    vx, vy = rx + rw / 2 - ox, ry + rh / 2 - oy        # centre of the outline
+    txs = [p[0] for _k, pts in shapes for p in pts]
+    tys = [p[1] for _k, pts in shapes for p in pts]
+    ref_x = (min(txs) - ox) if txs else 0.0
+    ref_y = (min(tys) - oy - 0.3) if tys else -3.0     # just above the outline
+
+    out = [f'(footprint "{title}"',
+           '\t(version 20240108)',
+           '\t(generator "fp_outline_to_sch")',
+           '\t(layer "F.Cu")',
+           '\t(property "Reference" "REF**"',
+           f'\t\t(at {ref_x:.4f} {ref_y:.4f} 0)\n\t\t(layer "F.SilkS")',
+           f'\t\t(uuid "{uuid.uuid4()}")',
+           '\t\t(effects\n\t\t\t(font (size 1.27 1.27) (thickness 0.15))',
+           '\t\t\t(justify left bottom)\n\t\t)\n\t)',
+           f'\t(property "Value" "{title}"',
+           f'\t\t(at {vx:.4f} {vy:.4f} 0)\n\t\t(layer "F.Fab")',
+           f'\t\t(uuid "{uuid.uuid4()}")',
+           '\t\t(effects (font (size 1.8 1.8) (thickness 0.25)))\n\t)',
+           '\t(attr through_hole)']
+
+    for _kind, pts in shapes:
+        for (x1, y1), (x2, y2) in zip(pts, pts[1:]):
+            out.append('\t(fp_line\n'
+                       f'\t\t(start {x1 - ox:.4f} {y1 - oy:.4f})\n'
+                       f'\t\t(end {x2 - ox:.4f} {y2 - oy:.4f})\n'
+                       '\t\t(stroke (width 0.12) (type solid))\n'
+                       f'\t\t(layer "F.SilkS")\n\t\t(uuid "{uuid.uuid4()}")\n\t)')
+
+    for name, x, y, _w, _h, _r in pads:
+        shape = "roundrect" if is_first_pin(name) else "circle"
+        extra = (f'\n\t\t(roundrect_rratio {PAD_RRATIO})'
+                 if shape == "roundrect" else "")
+        out.append(f'\t(pad "{name}" thru_hole {shape}\n'
+                   f'\t\t(at {x - ox:.4f} {y - oy:.4f})\n'
+                   f'\t\t(size {PAD_SIZE} {PAD_SIZE})\n'
+                   f'\t\t(drill {PAD_DRILL})\n'
+                   '\t\t(layers "*.Cu" "*.Mask")'
+                   f'{extra}\n\t\t(uuid "{uuid.uuid4()}")\n\t)')
+
+    xs = [p[0] for _k, pts in shapes for p in pts]
+    ys = [p[1] for _k, pts in shapes for p in pts]
+    if xs:
+        out.append('\t(fp_rect\n'
+                   f'\t\t(start {min(xs) - ox - 0.25:.4f} {min(ys) - oy - 0.25:.4f})\n'
+                   f'\t\t(end {max(xs) - ox + 0.25:.4f} {max(ys) - oy + 0.25:.4f})\n'
+                   '\t\t(stroke (width 0.05) (type solid))\n\t\t(fill no)\n'
+                   f'\t\t(layer "F.CrtYd")\n\t\t(uuid "{uuid.uuid4()}")\n\t)')
+
+    if os.path.exists(path):
+        shutil.copyfile(path, path + ".BAK")
+    open(path, "w", encoding="utf-8", newline="\n").write("\n".join(out) + "\n)\n")
+    print(f"{title}: {len(pads)} pad(s), pin 1 at the origin -> {path}")
+
+
+def footprint_picture(path, args):
+    """(title, shapes, pads) for a .kicad_mod file."""
+    text = open(path, encoding="utf-8", errors="replace").read()
+    title = re.match(r'\(footprint "([^"]*)"', text.lstrip()).group(1)
+    shapes = []
+    for kind in SHAPES:
+        for _, blk in blocks(text, kind):
+            layer = re.search(r'\(layer "([^"]+)"', blk)
+            if not layer or layer.group(1) != args.layer:
+                continue
+            pts = [(float(x), float(y)) for x, y in re.findall(
+                r'\((?:xy|start|end|center|mid) (-?[\d.]+) (-?[\d.]+)', blk)]
+            if pts:
+                shapes.append((kind, pts))
+    pads = [] if args.no_pads else pads_of(text, False)
+    return title, shapes, pads
+
+
 def pads_of(fp, flip):
     """(name, cx, cy, w, h, round?) for every pad, in as-drawn coordinates."""
     out = []
@@ -203,10 +442,15 @@ def main():
         description=DESCRIPTION,
         epilog=EPILOG,
         formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("board", help="the .kicad_pcb to read the footprint from")
-    ap.add_argument("sheet", help="the .kicad_sch to add the picture to")
-    ap.add_argument("refs", nargs="+", metavar="REF",
-                    help="references of the footprints, e.g. J2 J6 JP10")
+    ap.add_argument("source", metavar="SOURCE",
+                    help="a .kicad_pcb, a .kicad_mod, or a (rect NAME ...) "
+                         "description")
+    ap.add_argument("target", metavar="TARGET",
+                    help="a .kicad_sch to draw on, or a .kicad_mod to write "
+                         "(only from a description)")
+    ap.add_argument("refs", nargs="*", metavar="REF",
+                    help="with a .kicad_pcb source: the footprint references "
+                         "to draw, e.g. J2 J6 JP10")
     ap.add_argument("--layer", default="F.SilkS",
                     help="footprint-side layer to copy (default: F.SilkS)")
     ap.add_argument("--at", metavar="X,Y",
@@ -228,17 +472,57 @@ def main():
                     help="line width on the schematic (default: 0.15)")
     args = ap.parse_args()
 
-    board = open(args.board, encoding="utf-8", errors="replace").read()
-    sheet = open(args.sheet, encoding="utf-8", errors="replace").read()
+    src, dst = args.source, args.target
+    is_spec = src.lstrip().startswith("(")
 
-    shutil.copyfile(args.sheet, args.sheet + ".BAK")
-    for ref in args.refs:
-        sheet = add_picture(board, sheet, ref, args)
-    open(args.sheet, "w", encoding="utf-8", newline="\n").write(sheet)
+    if dst.endswith(".kicad_mod"):
+        if not is_spec:
+            sys.exit("a .kicad_mod can only be written from a (rect ...) "
+                     "description")
+        title, shapes, pads, rect = spec_picture(src)
+        write_footprint(title, shapes, pads, rect, dst)
+        return
+
+    if not dst.endswith(".kicad_sch"):
+        sys.exit("the target must be a .kicad_sch or a .kicad_mod")
+
+    sheet = open(dst, encoding="utf-8", errors="replace").read()
+    shutil.copyfile(dst, dst + ".BAK")
+
+    if is_spec:
+        title, shapes, pads, _rect = spec_picture(src)
+        sheet = place(sheet, title, shapes, [] if args.no_pads else pads, args,
+                      f"{title}: {len(shapes)} graphic(s) from the "
+                      f"description, {len(pads)} pin(s)")
+    elif src.endswith(".kicad_mod"):
+        title, shapes, pads = footprint_picture(src, args)
+        sheet = place(sheet, title, shapes, pads, args,
+                      f"{title}: {len(shapes)} graphic(s) from {args.layer}, "
+                      f"{len(pads)} pad(s)")
+    else:
+        board = open(src, encoding="utf-8", errors="replace").read()
+        if not args.refs:
+            sys.exit("a .kicad_pcb source needs at least one reference")
+        for ref in args.refs:
+            sheet = add_picture(board, sheet, ref, args)
+
+    open(dst, "w", encoding="utf-8", newline="\n").write(sheet)
 
 
 def add_picture(board, sheet, ref, args):
-    """Return the sheet with one footprint's picture appended."""
+    """Return the sheet with one picture appended.
+
+    `ref` is either a footprint reference on the board, or a (rect ...)
+    description of a connector to draw from scratch.
+    """
+    if ref.lstrip().startswith("("):
+        title, shapes, pads, _rect = spec_picture(ref)
+        if args.no_pads:
+            pads = []
+        return place(sheet, title, shapes, pads, args,
+                     f"{title}: {len(shapes)} graphic(s) from the description, "
+                     f"{len(pads)} pin(s)")
+
     fp = find_footprint(board, ref)
     at = re.search(r'\(at (-?[\d.]+) (-?[\d.]+)(?: (-?[\d.]+))?\)', fp)
     angle = float(at.group(3) or 0)
@@ -276,12 +560,19 @@ def add_picture(board, sheet, ref, args):
         sys.exit(f"{ref}: nothing on {args.layer}")
 
     pads = [] if args.no_pads else pads_of(fp, flip)
+    return place(sheet, ref, shapes, pads, args,
+                 f"{ref}: {len(shapes)} graphic(s) from {stored}, "
+                 f"{len(pads)} pad(s)")
+
+
+def place(sheet, title, shapes, pads, args, note):
+    """Append one picture to the sheet and return it."""
     labels = factor_rows(pads, args.row_name_offset) if pads else []
 
     xs = [p[0] for _, pts in shapes for p in pts] + [x for _t, x, _y in labels]
     ys = [p[1] for _, pts in shapes for p in pts] + [y for _t, _x, y in labels]
 
-    # The reference goes above the picture, in the same font as the pads.
+    # the title goes above the picture, in the same font as the pads
     title_y = min(ys) - args.font_size * 1.6
     ys.append(title_y)
     cx, cy = (min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2
@@ -291,7 +582,7 @@ def add_picture(board, sheet, ref, args):
     else:
         tx, ty = off_page(sheet, max(ys) - min(ys))
 
-    body = emit_text(ref, tx, title_y - cy + ty,
+    body = emit_text(title, tx, title_y - cy + ty,
                      args.font_size, args.label_drop)
     for kind, pts in shapes:
         body += emit(kind, [(x - cx + tx, y - cy + ty) for x, y in pts],
@@ -304,8 +595,7 @@ def add_picture(board, sheet, ref, args):
     sheet = sheet.rstrip()
     assert sheet.endswith(")")
 
-    print(f"{ref}: {len(shapes)} graphic(s) from {stored}, {len(pads)} pad(s), "
-          f"{max(xs)-min(xs):.2f} x {max(ys)-min(ys):.2f} mm, "
+    print(f"{note}, {max(xs)-min(xs):.2f} x {max(ys)-min(ys):.2f} mm, "
           f"parked off-page at ({tx:.2f}, {ty:.2f})")
     return sheet[:-1] + body + ")\n"
 
