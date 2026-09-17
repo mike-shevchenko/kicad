@@ -39,7 +39,8 @@ Excluding
 
 An exclusion names a whole string as printed, never a part of one.
 
-  -e N ...            by number, from either list; the easiest way, and needs no quoting
+  -e N ...            by number, from either list, with or without the printed full stop;
+                      the easiest way, and it needs no quoting
   -e STRING ...       by value; a Python literal is accepted too, so a string printed as
                       '-12|DE2' can be passed as "'-12|DE2'" when the shell allows it
   -E FILE             one string per line, taken verbatim; use this for strings that are
@@ -121,8 +122,9 @@ def survey(files, sample, verbose=False, excluded=()):
                 contains.setdefault(value, Counter())[path] += 1
                 if verbose:
                     note = " excluded by -e" if value in excluded else ""
-                    print(f"{where} {value!r} contains {sample!r} "
-                          f"{len(good)} time(s){note}")
+                    n = len(good)
+                    print(f"{where} {value!r} contains {sample!r} at {n} "
+                          f"place{'' if n == 1 else 's'}{note}")
             elif verbose:
                 print(f"{where} not a match: {sample!r} in {value!r} is {reason}")
     return equal, contains
@@ -145,10 +147,14 @@ def report(sample, equal, contains, excluded=(), first=1, number_exact=False,
 
     def line(value, counter, i=None):
         mark = " (excluded)" if value in excluded else ""
-        tag = f"[{i}] " if i else ""
-        print(f"    {tag}{value!r} x{sum(counter.values())}{mark}")
+        tag = f"{i}. " if i else ""
+        n = sum(counter.values())
+        print(f"    {tag}{value!r} at {n} place{'' if n == 1 else 's'}.{mark}")
 
-    if number_exact:
+    if number_exact and len(equal) == 1:        # the one string is the name itself
+        numbered.append(next(iter(equal)))
+        print(f"  {first}. Equal strings: {total_of(equal)}.")
+    elif number_exact:
         print(f"  Equal strings: {total_of(equal)}.")
         for value in sorted(equal):
             numbered.append(value)
@@ -165,8 +171,8 @@ def report(sample, equal, contains, excluded=(), first=1, number_exact=False,
 def resolve_exclusions(items, path, order):
     out = set()
     for item in items:
-        if item.isdigit():
-            n = int(item)
+        if item.rstrip(".").isdigit():          # a number copied with its full stop
+            n = int(item.rstrip("."))
             if not 1 <= n <= len(order):
                 sys.exit(f"-e {n}: there is no string with that number")
             out.add(order[n - 1])
