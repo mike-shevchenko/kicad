@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Copy a footprint's graphics from the board onto the schematic, 1:1."""
+"""Draw a connector on a schematic sheet, or make a footprint for one.
+
+See --help for the modes, the specification language and the options.
+"""
 
 import argparse
 import math
@@ -9,32 +12,50 @@ import shutil
 import sys
 import uuid
 
-DESCRIPTION = "Copy a footprint's graphics from the board onto the schematic, 1:1."
+DESCRIPTION = "Draw a connector on a schematic sheet, or make a footprint for one."
 
 EPILOG = """\
-The footprint's own F.SilkS graphics (as drawn in the Footprint Editor,
-without the board placement's rotation or flip) are added to the sheet as
-schematic graphics at the same millimetre scale, with the pad numbers as
-small text. A shared letter prefix within a row is factored out into one
-label at the left of that row.
+Modes
 
-A REF may instead be a description of a connector to draw from scratch:
+  SOURCE                TARGET            what happens
+  board.kicad_pcb       sheet.kicad_sch   the named footprints are drawn (one or more REFs)
+  conn.kicad_mod        sheet.kicad_sch   that footprint is drawn
+  (rect NAME ...)       sheet.kicad_sch   the specification is drawn
+  (rect NAME ...)       conn.kicad_mod    a footprint is written
+
+A specification may be given on the command line or kept in a .txt file, which is easier
+once it runs to several lines.
+
+What is drawn
+
+The footprint's own F.SilkS graphics, as drawn in the Footprint Editor — the board placement's
+rotation and flip are undone, so the picture shows the connector as designed. Pad numbers are
+added as small text, and a letter prefix shared by a whole row is factored out into one label at
+the left of that row. Each picture is parked past the right edge of the page, below anything
+parked there already, with its reference above it.
+
+Specification
 
   (rect NAME
-    (outer W H (top_notches (xwh X W H) ...)? (bottom_notches ...)?)
+    (outer W H (top_notches (xwh X W H)...)? (bottom_notches ...)?)
     (inner W H ... (offset X Y)?)?
-    (pins PITCH (row NAME ...) ... (offset X Y)?)?)
+    (pins PITCH (row PIN_NAME...)... (offset X Y)?)?
+  )
 
-Coordinates start at the top-left corner, as on the board. A notch of
-height H steps down into the shape; a negative height steps up. A notch
-touching the left or right end of its edge has no vertical line there.
-The inner outline is centred in the outer one, and the pins are centred
-in the inner outline (or the outer one, if there is no inner), ignoring
-the notches. Either can be shifted from there with (offset X Y); moving
-the inner outline moves the pins with it.
+Coordinates start at the top-left corner, as on the board. A notch of height H steps down into
+the shape; a negative height steps up. A notch touching the left or right end of its edge has no
+vertical line there. The inner outline is centred in the outer one, and the pins are centred in
+the inner outline (or the outer one, if there is no inner), ignoring the notches. Either can be
+shifted from there with (offset X Y); moving the inner outline moves the pins with it.
 
-The sheet is rewritten in place; the previous contents are kept as
-sheet.kicad_sch.BAK.
+Generated footprint
+
+The outline goes on F.SilkS and the pins become through-hole pads of 2.54 mm pin-header size,
+square for pin 1 of each row and round for the rest. The origin sits on the first pin. Reference
+and Value are placed at the top-left corner and the centre of the outline.
+
+Whatever is written — sheet or footprint — the previous contents are kept alongside it as a
+.BAK file.
 """
 
 SHAPES = ("fp_line", "fp_rect", "fp_poly", "fp_circle", "fp_arc")
@@ -47,7 +68,7 @@ SHAPES = ("fp_line", "fp_rect", "fp_poly", "fp_circle", "fp_arc")
 def form_end(text, start):
     """Index just past the closing paren of the form starting at `start`.
 
-    Parentheses inside quoted strings are ignored, so a description or a
+    Parentheses inside quoted strings are ignored, so a specification or a
     text item containing one does not throw the count off.
     """
     depth = 0
@@ -217,7 +238,7 @@ def rect_outline(form):
 
 
 def spec_picture(text):
-    """(title, shapes, pads) for a (rect NAME ...) description."""
+    """(title, shapes, pads) for a (rect NAME ...) specification."""
     form = sexpr(text)
     if not form or form[0] != "rect":
         sys.exit("spec: expected (rect NAME ...)")
@@ -310,8 +331,7 @@ def write_footprint(title, shapes, pads, rect, path):
 
     for name, x, y, _w, _h, _r in pads:
         shape = "roundrect" if is_first_pin(name) else "circle"
-        extra = (f'\n\t\t(roundrect_rratio {PAD_RRATIO})'
-                 if shape == "roundrect" else "")
+        extra = (f'\n\t\t(roundrect_rratio {PAD_RRATIO})' if shape == "roundrect" else "")
         out.append(f'\t(pad "{name}" thru_hole {shape}\n'
                    f'\t\t(at {x - ox:.4f} {y - oy:.4f})\n'
                    f'\t\t(size {PAD_SIZE} {PAD_SIZE})\n'
@@ -441,13 +461,13 @@ def main():
     ap = argparse.ArgumentParser(
         description=DESCRIPTION,
         epilog=EPILOG,
-        formatter_class=argparse.RawDescriptionHelpFormatter)
+        formatter_class=lambda prog: argparse.RawDescriptionHelpFormatter(prog, width=99))
     ap.add_argument("source", metavar="SOURCE",
-                    help="a .kicad_pcb, a .kicad_mod, or a (rect NAME ...) "
-                         "description")
+                    help="a .kicad_pcb, a .kicad_mod, a (rect NAME ...) specification, or a .txt "
+                         "file holding one")
     ap.add_argument("target", metavar="TARGET",
                     help="a .kicad_sch to draw on, or a .kicad_mod to write "
-                         "(only from a description)")
+                         "(only from a specification)")
     ap.add_argument("refs", nargs="*", metavar="REF",
                     help="with a .kicad_pcb source: the footprint references "
                          "to draw, e.g. J2 J6 JP10")
@@ -470,15 +490,20 @@ def main():
                          "drawing each shape once")
     ap.add_argument("--stroke-width", default="0.15", metavar="MM",
                     help="line width on the schematic (default: 0.15)")
+    if len(sys.argv) == 1:               # no arguments: show the help
+        ap.print_help()
+        return
     args = ap.parse_args()
 
     src, dst = args.source, args.target
+
+    if src.endswith(".txt"):                       # the specification kept in a file
+        src = open(src, encoding="utf-8").read()
     is_spec = src.lstrip().startswith("(")
 
     if dst.endswith(".kicad_mod"):
         if not is_spec:
-            sys.exit("a .kicad_mod can only be written from a (rect ...) "
-                     "description")
+            sys.exit("a .kicad_mod can only be written from a (rect ...) specification")
         title, shapes, pads, rect = spec_picture(src)
         write_footprint(title, shapes, pads, rect, dst)
         return
@@ -493,7 +518,7 @@ def main():
         title, shapes, pads, _rect = spec_picture(src)
         sheet = place(sheet, title, shapes, [] if args.no_pads else pads, args,
                       f"{title}: {len(shapes)} graphic(s) from the "
-                      f"description, {len(pads)} pin(s)")
+                      f"specification, {len(pads)} pin(s)")
     elif src.endswith(".kicad_mod"):
         title, shapes, pads = footprint_picture(src, args)
         sheet = place(sheet, title, shapes, pads, args,
@@ -513,14 +538,14 @@ def add_picture(board, sheet, ref, args):
     """Return the sheet with one picture appended.
 
     `ref` is either a footprint reference on the board, or a (rect ...)
-    description of a connector to draw from scratch.
+    specification of a connector to draw from scratch.
     """
     if ref.lstrip().startswith("("):
         title, shapes, pads, _rect = spec_picture(ref)
         if args.no_pads:
             pads = []
         return place(sheet, title, shapes, pads, args,
-                     f"{title}: {len(shapes)} graphic(s) from the description, "
+                     f"{title}: {len(shapes)} graphic(s) from the specification, "
                      f"{len(pads)} pin(s)")
 
     fp = find_footprint(board, ref)
@@ -582,15 +607,12 @@ def place(sheet, title, shapes, pads, args, note):
     else:
         tx, ty = off_page(sheet, max(ys) - min(ys))
 
-    body = emit_text(title, tx, title_y - cy + ty,
-                     args.font_size, args.label_drop)
+    body = emit_text(title, tx, title_y - cy + ty, args.font_size, args.label_drop)
     for kind, pts in shapes:
-        body += emit(kind, [(x - cx + tx, y - cy + ty) for x, y in pts],
-                     args.stroke_width)
+        body += emit(kind, [(x - cx + tx, y - cy + ty) for x, y in pts], args.stroke_width)
 
     for name, x, y in labels:
-        body += emit_text(name, x - cx + tx, y - cy + ty,
-                          args.font_size, args.label_drop)
+        body += emit_text(name, x - cx + tx, y - cy + ty, args.font_size, args.label_drop)
 
     sheet = sheet.rstrip()
     assert sheet.endswith(")")
