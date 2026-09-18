@@ -12,6 +12,7 @@ Resolution. 84.667 DPI gives 0.3 mm pixels, 101.6 DPI gives 0.25 mm.
 Horizontally adjacent pixels are merged into single rectangles, which keeps
 the file small without changing the geometry.
 """
+# Written with the help of Claude Opus 5.
 
 from PIL import Image
 import os

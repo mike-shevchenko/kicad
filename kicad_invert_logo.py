@@ -9,6 +9,7 @@ KiCad polygons cannot have holes, so any hole left by inversion (the counters
 inside the letters) is resolved by splitting the polygon vertically through
 the hole until every piece is simply connected.
 """
+# Written with the help of Claude Opus 5.
 
 import re
 import sys

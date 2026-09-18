@@ -13,6 +13,7 @@ KiCad polygons have no holes, so the cut is done in two parts:
   * the part of R that is not glyph is emitted as new polygons.
 The union of the two is the original shape minus the glyph.
 """
+# Written with the help of Claude Opus 5.
 
 import re
 import sys

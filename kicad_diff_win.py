@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Windows launcher for KiDiff: CLI passthrough, git diff driver, Fork diff tool. See --help."""
+# Written with the help of Claude Opus 5.
 
 import argparse
 import hashlib

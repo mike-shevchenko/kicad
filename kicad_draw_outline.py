@@ -3,6 +3,7 @@
 
 See --help for the modes, the specification language and the options.
 """
+# Written with the help of Claude Opus 5.
 
 import argparse
 import math

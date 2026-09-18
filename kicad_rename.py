@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Rename a string in every KiCad file of the current project. See --help."""
+# Written with the help of Claude Opus 5.
 
 import argparse
 import ast
