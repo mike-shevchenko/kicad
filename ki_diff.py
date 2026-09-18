@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Windows launcher for KiDiff: CLI passthrough, git diff driver, Fork diff tool. See --help."""
 # Written with the help of Claude Opus 5.
+# Wrappers on PATH: ki-diff.cmd for cmd.exe, Fork and git; ki-diff for
+# cygwin and git-bash, which converts POSIX paths first. Create them with ki_install.py.
 
 import argparse
 import hashlib
@@ -25,7 +27,7 @@ and this launcher works around all of them without modifying the installed KiDif
     under the newest Program Files\\KiCad\\*\\bin\\python.exe, or $KICAD_PYTHON.
   * KiDiff writes layers.csv through csv.writer on a stream opened without newline='', so
     rows end \\r\\r\\n. Reading that back yields a blank row and an IndexError, meaning the
-    second diff of any board crashes. Caches are normalised here before and after a run.
+    second diff of any board crashes. Caches are normalized here before and after a run.
   * Without --output_dir KiDiff writes into a mkdtemp() that it deletes on exit, relying on
     xdg-open to have grabbed the file first. On Windows there is no xdg-open, so the diff is
     generated and discarded. Every mode here sets an explicit output directory.
@@ -35,37 +37,22 @@ which drives eeschema through xvfb and xdotool.
 
 Modes
 
-  kidiff <kicad-diff.py args>            Pass everything through to kicad-diff.py.
-  kidiff --fork OLD NEW                  Diff two files and open the PDF. For Fork.
-  kidiff --git-diff <7 git args>         git external-diff driver. Called by git.
+  ki-diff <kicad-diff.py args>            Pass everything through to kicad-diff.py.
+  ki-diff --fork OLD NEW                  Diff two files and open the PDF. For Fork.
+  ki-diff --git-diff <7 git args>         git external-diff driver. Called by git.
   ... --all-layers                       Either of those, keeping unchanged layers too.
-  kidiff --selftest                      Check that KiDiff and its dependencies resolve.
-  kidiff --clean [cache|pdfs|all]        List, or remove, what previous runs left behind.
-  kidiff                                 Print this help.
-  kidiff -- <args>                       Pass <args> through verbatim, flags and all.
+  ki-diff --selftest                      Check that KiDiff and its dependencies resolve.
+  ki-diff --clean [cache|pdfs|all]        List, or remove, what previous runs left behind.
+  ki-diff                                 Print this help.
+  ki-diff -- <args>                       Pass <args> through verbatim, flags and all.
 
 Run with --help or no arguments for this text. Anything else is handed to kicad-diff.py, so
-"kidiff -- --help" reaches KiDiff's own help and "kidiff -- --version" its version.
-
-Installing
-
-  One .cmd file anywhere on PATH, e.g. C:\\programs\\kidiff.cmd, containing exactly:
-
-      @python "C:\\github\\public\\kicad\\kicad_diff_win.py" %*
-
-  Any python on PATH will do: if it cannot import pcbnew this script re-runs itself under
-  KiCad's interpreter. That one shim serves all three modes, because both git and Fork let
-  you put arguments after the program path.
-
-  cygwin and MSYS/git-bash ignore PATHEXT, so the bare name needs an extensionless "kidiff"
-  beside the .cmd, chmod +x, exec'ing the same command. Have it pass absolute POSIX
-  arguments through "cygpath -w" first: MSYS rewrites them for native programs, cygwin does
-  not. cmd.exe goes on using the .cmd, so the two never collide.
+"ki-diff -- --help" reaches KiDiff's own help and "ki-diff -- --version" its version.
 
 Setting up git
 
   echo *.kicad_pcb diff=kicad_diff >> .gitattributes
-  git config --local diff.kicad_diff.command "C:/programs/kidiff.cmd --git-diff"
+  git config --local diff.kicad_diff.command "C:/programs/ki-diff.cmd --git-diff"
 
   git diff uses the driver; git show and git log -p need --ext-diff; --no-ext-diff disables
   it. PDFs land in <repo>/.git/kicad-git-cache/ next to the render cache, named
@@ -81,10 +68,10 @@ Cleaning up
   Each area holds KiDiff's render cache as one subdirectory per file hash, and the diffs as
   .pdf files beside them. The cache is the bulk of it and is regenerated on demand.
 
-  kidiff --clean          Report both areas with counts and sizes. Removes nothing.
-  kidiff --clean cache    Drop the render caches, keep every PDF.
-  kidiff --clean pdfs     Drop the PDFs, keep the caches so redraws stay fast.
-  kidiff --clean all      Drop both, and the directories themselves.
+  ki-diff --clean          Report both areas with counts and sizes. Removes nothing.
+  ki-diff --clean cache    Drop the render caches, keep every PDF.
+  ki-diff --clean pdfs     Drop the PDFs, keep the caches so redraws stay fast.
+  ki-diff --clean all      Drop both, and the directories themselves.
 
   Run it inside a repository to include that repository's cache; outside one, only the temp
   area is touched. Nothing here ever deletes a file git is tracking: both areas live outside
@@ -94,11 +81,11 @@ Setting up Fork
 
   Preferences -> Integration -> Diff Tools -> add one:
       Title:        KiDiff (PCB)
-      Path:         C:\\programs\\kidiff.cmd
+      Path:         C:\\programs\\ki-diff.cmd
       Arguments:    --fork $LOCAL $REMOTE          (add --all-layers before $LOCAL for all)
 
   Fork lists every registered tool in its External Diff submenu, so pick this one on
-  .kicad_pcb files. $LOCAL is the left/older side; swap the two if the colours come out
+  .kicad_pcb files. $LOCAL is the left/older side; swap the two if the colors come out
   reversed. The PDF opens in the default viewer and is written to the same place the git
   driver uses, so removing the repository removes it too.
 """
@@ -110,12 +97,12 @@ RELAUNCH_FLAG = "KIDIFF_UNDER_KICAD_PYTHON"
 
 
 def die(message, code=1):
-    sys.stderr.write("[kidiff] " + message + "\n")
+    sys.stderr.write("[ki-diff] " + message + "\n")
     sys.exit(code)
 
 
 def note(message):
-    sys.stderr.write("[kidiff] " + message + "\n")
+    sys.stderr.write("[ki-diff] " + message + "\n")
 
 
 def shown(path):
@@ -136,7 +123,7 @@ def find_kicad_python():
     if override:
         return override if os.path.isfile(override) else None
     roots = [os.path.join(os.environ.get("ProgramFiles", r"C:\Program Files"), "KiCad"),
-             os.path.join(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"), "KiCad")]
+        os.path.join(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"), "KiCad")]
     found = []
     for root in roots:
         if not os.path.isdir(root):
@@ -178,11 +165,11 @@ def ensure_kicad_python():
     # subprocess rather than os.execv: on Windows exec detaches, which would hand git a
     # premature exit code and unordered output.
     sys.exit(subprocess.call([target, os.path.realpath(__file__)] + sys.argv[1:],
-                             env=environment))
+        env=environment))
 
 
 def find_kicad_diff():
-    """Locate kicad-diff.py as installed by "pip install kidiff"."""
+    """Locate kicad-diff.py as installed by "pip install ki-diff"."""
     candidates = []
     for scheme in ("nt_user", None):
         try:
@@ -199,7 +186,7 @@ def find_kicad_diff():
         if os.path.isfile(path):
             return path
     die("kicad-diff.py not found. Install it with:\n"
-        '           "%s" -m pip install --user kidiff' % sys.executable)
+        '           "%s" -m pip install --user ki-diff' % sys.executable)
 
 
 def heal_layer_cache(cache_dir):
@@ -262,10 +249,10 @@ def reject_schematics(ext):
 def git_dir():
     try:
         result = subprocess.run(["git", "rev-parse", "--absolute-git-dir"],
-                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                                universal_newlines=True)
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            universal_newlines=True)
         if result.returncode == 0 and result.stdout.strip():
-            # git answers with forward slashes; normalise so printed paths are not mixed.
+            # git answers with forward slashes; normalize so printed paths are not mixed.
             return os.path.normpath(result.stdout.strip())
     except OSError:
         pass
@@ -275,7 +262,7 @@ def git_dir():
 
 def mode_git_diff(argv):
     """git external-diff driver: path old-file old-hex old-mode new-file new-hex new-mode."""
-    parser = argparse.ArgumentParser(prog="kidiff --git-diff", add_help=False)
+    parser = argparse.ArgumentParser(prog="ki-diff --git-diff", add_help=False)
     parser.add_argument("--resolution", type=int, default=150)
     parser.add_argument("--all-layers", action="store_true")
     parser.add_argument("-v", "--verbose", action="count", default=0)
@@ -297,7 +284,7 @@ def mode_git_diff(argv):
     # git uses an all-zero hash for the not-yet-committed working-tree file.
     is_worktree = not int(new_hex, 16)
     out_name = "%s_%s_to_%s.pdf" % (safe_name(os.path.basename(name)), old_hex[:8],
-                                    "worktree" if is_worktree else new_hex[:8])
+        "worktree" if is_worktree else new_hex[:8])
 
     cache = git_dir()
     if cache:
@@ -310,7 +297,7 @@ def mode_git_diff(argv):
     else:
         note("not inside a git repository; running without a cache")
 
-    with tempfile.TemporaryDirectory(prefix="kidiff-") as workdir:
+    with tempfile.TemporaryDirectory(prefix="ki-diff-") as workdir:
         args = ["--resolution", str(options.resolution), "--old_file_hash", old_hex]
         if not options.all_layers:
             args.append("--only_different")
@@ -323,12 +310,12 @@ def mode_git_diff(argv):
         if os.path.isfile(".kicad-git-diff"):
             args += ["--exclude", ".kicad-git-diff"]
         args += [as_kicad_file(old_file, ext, workdir, "old"),
-                 as_kicad_file(new_file, ext, workdir, "new")]
+            as_kicad_file(new_file, ext, workdir, "new")]
         code = run_kicad_diff(args, cache)
 
     if code == 0 and cache:
         # A diff driver's stdout is shown in git's own output.
-        print("[kidiff] PDF: " + shown(os.path.join(cache, out_name)))
+        print("[ki-diff] PDF: " + shown(os.path.join(cache, out_name)))
     return code
 
 
@@ -352,11 +339,11 @@ def mode_fork(argv):
     # every artefact with it. Only a diff of files outside any repository falls back to temp.
     repo = git_dir()
     out_dir = (os.path.join(repo, CACHE_NAME) if repo
-               else os.path.join(tempfile.gettempdir(), "kidiff"))
+        else os.path.join(tempfile.gettempdir(), "ki-diff"))
     os.makedirs(out_dir, exist_ok=True)
 
     key = hashlib.sha1((os.path.abspath(old_file) + "|" +
-                        os.path.abspath(new_file)).encode("utf-8")).hexdigest()[:8]
+        os.path.abspath(new_file)).encode("utf-8")).hexdigest()[:8]
     out_name = "%s_%s.pdf" % (safe_name(os.path.basename(new_file))[:60], key)
 
     # Diffing the same pair twice is normal here, and the viewer opened last time still holds
@@ -368,12 +355,12 @@ def mode_fork(argv):
         except OSError:
             out_name = "%s_%d.pdf" % (out_name[:-4], os.getpid())
 
-    with tempfile.TemporaryDirectory(prefix="kidiff-") as workdir:
+    with tempfile.TemporaryDirectory(prefix="ki-diff-") as workdir:
         args = ["--cache_dir", out_dir, "--output_dir", out_dir, "--output_name", out_name]
         if not all_layers:
             args.append("--only_different")
         args += [as_kicad_file(old_file, ext, workdir, "old"),
-                 as_kicad_file(new_file, ext, workdir, "new")]
+            as_kicad_file(new_file, ext, workdir, "new")]
         code = run_kicad_diff(args, out_dir)
 
     pdf = os.path.join(out_dir, out_name)
@@ -388,30 +375,30 @@ def mode_fork(argv):
 
 def mode_selftest():
     ok = True
-    print("interpreter   : %s" % sys.executable)
+    print("interpreter: %s" % sys.executable)
     try:
         import pcbnew
-        print("pcbnew        : %s" % pcbnew.GetBuildVersion())
+        print("pcbnew: %s" % pcbnew.GetBuildVersion())
     except ImportError:
-        print("pcbnew        : MISSING - run this under KiCad's Python")
+        print("pcbnew: MISSING - run this under KiCad's Python")
         ok = False
-    print("kicad-diff.py : %s" % find_kicad_diff())
+    print("kicad-diff.py: %s" % find_kicad_diff())
 
     # KiDiff uses ImageMagick 7's "magick" when present and only falls back to the v6 name
     # "convert", which on Windows is easily shadowed: Embarcadero, GnuWin and others ship
     # an unrelated convert.exe. Report that rather than letting a bare which() imply a pass.
     for tool in ("magick", "compare", "identify"):
         found = shutil.which(tool)
-        print("%-14s: %s" % (tool, found or "MISSING - install ImageMagick 7"))
+        print("%s: %s" % (tool, found or "MISSING - install ImageMagick 7"))
         if not found:
             ok = False
     convert = shutil.which("convert")
     if convert and "imagemagick" not in convert.lower():
-        print("convert       : %s" % convert)
-        print("                not ImageMagick - harmless while magick exists, fatal without")
+        print("convert: %s" % convert)
+        print("  not ImageMagick - harmless while magick exists, fatal without")
 
     raster = shutil.which("pdftoppm") or shutil.which("gs")
-    print("%-14s: %s" % ("pdftoppm/gs", raster or "MISSING - install poppler or Ghostscript"))
+    print("pdftoppm/gs: %s" % (raster or "MISSING - install poppler or Ghostscript"))
     if not raster:
         ok = False
     return 0 if ok else 1
@@ -449,7 +436,7 @@ def clean_places():
         places.append(("repo", os.path.join(repo, CACHE_NAME)))
     else:
         note("not inside a git repository, so only the temp area is considered")
-    places.append(("temp", os.path.join(tempfile.gettempdir(), "kidiff")))
+    places.append(("temp", os.path.join(tempfile.gettempdir(), "ki-diff")))
     return places
 
 
@@ -479,13 +466,13 @@ def mode_clean(argv):
                 pdfs.append(full)
         found += len(caches) + len(pdfs)
         print("%s  %s" % (label, shown(path)))
-        print("      caches: %-3d (%s)" % (len(caches), human(sum(dir_size(c) for c in caches))))
-        print("      diffs : %-3d (%s)" % (len(pdfs), human(sum(os.path.getsize(p)
-                                                               for p in pdfs))))
+        print("  caches: %d (%s)" % (len(caches), human(sum(dir_size(c) for c in caches))))
+        print("  diffs: %d (%s)" % (len(pdfs),
+            human(sum(os.path.getsize(p) for p in pdfs))))
         if what == "list":
             continue
         doomed = [(c, True) for c in caches if what in ("cache", "all")] + \
-                 [(p, False) for p in pdfs if what in ("pdfs", "all")]
+            [(p, False) for p in pdfs if what in ("pdfs", "all")]
         for victim, is_cache in doomed:
             size = dir_size(victim) if is_cache else os.path.getsize(victim)
             try:
@@ -507,22 +494,22 @@ def mode_clean(argv):
 
     if what != "list":
         parts = [plural(n, word) for n, word in
-                 ((gone_caches, "cache"), (gone_pdfs, "diff")) if n]
+            ((gone_caches, "cache"), (gone_pdfs, "diff")) if n]
         if parts:
             print("Removed %s, freeing %s." % (" and ".join(parts), human(freed)))
         else:
             print("Nothing removed.")
         if failures:
             sys.stdout.flush()
-            sys.stderr.write("[kidiff] %s could not be removed:\n"
-                             % plural(len(failures), "item"))
+            sys.stderr.write("[ki-diff] %s could not be removed:\n"
+                % plural(len(failures), "item"))
             for victim, reason in failures:
                 sys.stderr.write("    %s (%s)\n" % (victim, reason))
         return 1 if failures else 0
     elif found:
         print("To clean, run any of:")
         for target in ("cache", "pdfs", "all"):
-            print("  kidiff --clean %s" % target)
+            print("  ki-diff --clean %s" % target)
     return 0
 
 
@@ -537,18 +524,19 @@ def mode_passthrough(argv):
     quiet = {"--version", "-h", "--help", "--only_cache"}
     produces_diff = not any(a in quiet for a in argv)
     if produces_diff and not any(a == "--output_dir" or a.startswith("--output_dir=")
-                                 for a in argv):
+        for a in argv):
         note("no --output_dir: KiDiff writes the PDF into a temporary directory and deletes "
-             "it on exit, so the diff will be lost.")
+            "it on exit, so the diff will be lost.")
     return run_kicad_diff(argv, cache)
 
 
 def print_help():
     argparse.ArgumentParser(
-        prog="kidiff",
-        usage="kidiff [--fork OLD NEW | --git-diff <git args> | --selftest | <KiDiff args>]",
+        prog="ki-diff",
+        usage="ki-diff [--fork OLD NEW | --git-diff <git args> | --selftest | <KiDiff args>]",
         description=DESCRIPTION, epilog=EPILOG,
-        formatter_class=argparse.RawDescriptionHelpFormatter).print_help()
+        formatter_class=lambda prog: argparse.RawDescriptionHelpFormatter(
+            prog, width=99)).print_help()
 
 
 def main():

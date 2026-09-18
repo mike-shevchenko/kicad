@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Rename a string in every KiCad file of the current project. See --help."""
 # Written with the help of Claude Opus 5.
+# Wrappers on PATH: ki-rename.cmd for cmd.exe, Fork and git; ki-rename for
+# cygwin and git-bash, which converts POSIX paths first. Create them with ki_install.py.
 
 import argparse
 import ast
@@ -24,7 +26,7 @@ it, so a field and its ${...} references stay together.
 
 What counts as a match
 
-An occurrence counts only when neither neighbouring character is a letter or a digit, in
+An occurrence counts only when neither neighboring character is a letter or a digit, in
 any language. An underscore does not separate: DE2 is found in X_DE2, DE2_Y and X_DE2_Y,
 but not in DE22 or CLAUDE2, and D1 is not found in LED1.
 
@@ -58,14 +60,14 @@ Other options
 
 Examples
 
-  kicad_rename.py J9 J1
-  kicad_rename.py J9 J1 -v
-  kicad_rename.py J9 J1 -e 3 4 7
-  kicad_rename.py J9 J1 -e 3 4 7 -f
+  ki-rename J9 J1
+  ki-rename J9 J1 -v
+  ki-rename J9 J1 -e 3 4 7
+  ki-rename J9 J1 -e 3 4 7 -f
 """
 
 SUFFIXES = (".kicad_sch", ".kicad_pcb", ".kicad_mod", ".kicad_pro", ".kicad_prl",
-            ".kicad_dru")
+    ".kicad_dru")
 
 STRING = re.compile(r'"((?:[^"\\]|\\.)*)"')
 LETTER_OR_DIGIT = re.compile(r"[^\W_]", re.UNICODE)
@@ -77,7 +79,7 @@ def kind_of(char):
 
 def project_files():
     return [n for n in sorted(os.listdir("."))
-            if n.endswith(SUFFIXES) and not n.endswith(".BAK")]
+        if n.endswith(SUFFIXES) and not n.endswith(".BAK")]
 
 
 def occurrences(value, sample):
@@ -125,7 +127,7 @@ def survey(files, sample, verbose=False, excluded=()):
                     note = " excluded by -e" if value in excluded else ""
                     n = len(good)
                     print(f"{where} {value!r} contains {sample!r} at {n} "
-                          f"place{'' if n == 1 else 's'}{note}")
+                        f"place{'' if n == 1 else 's'}{note}")
             elif verbose:
                 print(f"{where} not a match: {sample!r} in {value!r} is {reason}")
     return equal, contains
@@ -136,7 +138,7 @@ def total_of(counters):
 
 
 def report(sample, equal, contains, excluded=(), first=1, number_exact=False,
-           clash=False):
+        clash=False):
     """Print one survey; returns its values in the order they were numbered."""
     if not equal and not contains:
         if clash:
@@ -152,7 +154,7 @@ def report(sample, equal, contains, excluded=(), first=1, number_exact=False,
         n = sum(counter.values())
         print(f"    {tag}{value!r} at {n} place{'' if n == 1 else 's'}.{mark}")
 
-    if number_exact and len(equal) == 1:        # the one string is the name itself
+    if number_exact and len(equal) == 1:  # the one string is the name itself
         numbered.append(next(iter(equal)))
         print(f"  {first}. Equal strings: {total_of(equal)}.")
     elif number_exact:
@@ -172,7 +174,7 @@ def report(sample, equal, contains, excluded=(), first=1, number_exact=False,
 def resolve_exclusions(items, path, order):
     out = set()
     for item in items:
-        if item.rstrip(".").isdigit():          # a number copied with its full stop
+        if item.rstrip(".").isdigit():  # a number copied with its full stop
             n = int(item.rstrip("."))
             if not 1 <= n <= len(order):
                 sys.exit(f"-e {n}: there is no string with that number")
@@ -193,18 +195,19 @@ def resolve_exclusions(items, path, order):
 
 def main():
     ap = argparse.ArgumentParser(
+        prog="ki-rename",
         description=DESCRIPTION, epilog=EPILOG,
         formatter_class=lambda prog: argparse.RawDescriptionHelpFormatter(prog, width=99))
     ap.add_argument("sample", metavar="SAMPLE", help="the string to rename")
     ap.add_argument("replacement", metavar="REPLACEMENT", help="what to rename it to")
     ap.add_argument("-e", "--exclude", action="append", nargs="+", default=[],
-                    metavar="N|STRING", help="leave these whole strings alone")
+        metavar="N|STRING", help="leave these whole strings alone")
     ap.add_argument("-E", "--exclude-file", metavar="FILE",
-                    help="a file of strings to leave alone, one per line")
+        help="a file of strings to leave alone, one per line")
     ap.add_argument("-v", action="store_true", dest="verbose",
-                    help="log every occurrence and why it was taken or passed over")
+        help="log every occurrence and why it was taken or passed over")
     ap.add_argument("-f", action="store_true", dest="force",
-                    help="write the changes instead of only reporting them")
+        help="write the changes instead of only reporting them")
     if len(sys.argv) == 1:
         ap.print_help()
         return
@@ -231,10 +234,10 @@ def main():
 
     report(args.sample, equal, contains, excluded)
     clashes = report(args.replacement, new_equal, new_contains, excluded,
-                     first=len(contains) + 1, number_exact=True, clash=True)
+        first=len(contains) + 1, number_exact=True, clash=True)
 
     changing = total_of(equal) + sum(sum(c.values()) for value, c in contains.items()
-                                     if value not in excluded)
+        if value not in excluded)
     if excluded:
         print("\nExcluded:")
         for value in sorted(excluded):
@@ -243,14 +246,14 @@ def main():
     blocking = [v for v in clashes if v not in excluded]
     if blocking:
         print(f"\nRenaming would merge {args.sample!r} into {len(blocking)} string(s) "
-              f"already using {args.replacement!r}.")
+            f"already using {args.replacement!r}.")
         print("  Exclude each of them with -e, by number or by value, to say that this "
-              "is intended.")
+            "is intended.")
         if args.force:
             sys.exit("refusing to write")
     if not args.force:
         print(f"\n{changing} string(s) would change. "
-              f"Nothing written, repeat with -f to apply.")
+            f"Nothing written, repeat with -f to apply.")
         return
     if not changing:
         print("\nNothing to change.")

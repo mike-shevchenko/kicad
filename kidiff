@@ -1,5 +1,0 @@
-#!/bin/bash
-# Wrapper to allow running the .cmd script without extension; also converts path args for cygwin.
-mapfile -t args < <(cygpath -w -- "$@" `# Suppress printing cygpath help if no args #` 2>/dev/null)
-set -- "${args[@]}"
-exec "$0.cmd" "$@"

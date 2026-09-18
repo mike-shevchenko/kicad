@@ -2,7 +2,7 @@
 """
 Cut a pixel-font glyph out of a filled polygon in a KiCad footprint.
 
-    cut_signature.py AGAT-LOGO-10mm.kicad_mod out.kicad_mod
+    ki-cut-signature AGAT-LOGO-10mm.kicad_mod out.kicad_mod
 
 The glyph is placed in the bottom-right corner of the largest polygon,
 one pixel clear of the right and bottom edges.
@@ -14,13 +14,16 @@ KiCad polygons have no holes, so the cut is done in two parts:
 The union of the two is the original shape minus the glyph.
 """
 # Written with the help of Claude Opus 5.
+# Wrappers on PATH: ki-cut-signature.cmd for cmd.exe, Fork and git; ki-cut-signature for
+# cygwin and git-bash, which converts POSIX paths first. Create them with ki_install.py.
 
+import argparse
 import re
 import sys
 import uuid
 
 PIXEL = 0.15
-MARGIN = 1          # margin from the edges, in pixels
+MARGIN = 1  # margin from the edges, in pixels
 
 GLYPH = [
     "## # ",
@@ -28,7 +31,7 @@ GLYPH = [
     "# # #",
     "# # #",
     "# # #",
-]
+    ]
 
 
 def bbox_area(pts):
@@ -57,10 +60,10 @@ def parse_polys(text):
         b = form_end(text, a)
         block = text[a:b]
         pts = [(float(x), float(y))
-               for x, y in re.findall(r'\(xy ([-\d.]+) ([-\d.]+)\)', block)]
+            for x, y in re.findall(r'\(xy ([-\d.]+) ([-\d.]+)\)', block)]
         layer = re.search(r'\(layer "([^"]+)"', block)
         out.append({"span": (a, b), "pts": pts,
-                    "layer": layer.group(1) if layer else "F.SilkS"})
+            "layer": layer.group(1) if layer else "F.SilkS"})
     return out
 
 
@@ -90,12 +93,20 @@ def remainder_runs(cols, rows):
 def fmt_poly(pts, layer, width=0.0):
     body = "".join(f"      (xy {x:.6f} {y:.6f})\n" for x, y in pts)
     return (f"  (fp_poly\n    (pts\n{body}    )\n"
-            f"    (stroke (width {width}) (type solid)) (fill solid)\n"
-            f'    (layer "{layer}") (tstamp {uuid.uuid4()})\n  )\n')
+        f"    (stroke (width {width}) (type solid)) (fill solid)\n"
+        f'    (layer "{layer}") (tstamp {uuid.uuid4()})\n  )\n')
 
 
 def main():
-    src, dst = sys.argv[1], sys.argv[2]
+    parser = argparse.ArgumentParser(
+        prog="ki-cut-signature", description=__doc__,
+        formatter_class=lambda prog: argparse.RawDescriptionHelpFormatter(prog, width=99))
+    parser.add_argument("source", metavar="IN.kicad_mod",
+        help="footprint holding the polygon to cut")
+    parser.add_argument("output", metavar="OUT.kicad_mod",
+        help="where the cut footprint is written")
+    args = parser.parse_args()
+    src, dst = args.source, args.output
     text = open(src, encoding="utf-8").read()
 
     polys = parse_polys(text)
@@ -105,7 +116,7 @@ def main():
 
     xs = [p[0] for p in ring]
     ys = [p[1] for p in ring]
-    right, bottom = max(xs), max(ys)          # KiCad Y grows downward
+    right, bottom = max(xs), max(ys)  # KiCad Y grows downward
 
     gw = len(GLYPH[0]) * PIXEL
     gh = len(GLYPH) * PIXEL
@@ -116,10 +127,10 @@ def main():
 
     # 1. notch R out of the outline
     corner = next(i for i, p in enumerate(ring)
-                  if abs(p[0] - right) < 1e-6 and abs(p[1] - bottom) < 1e-6)
+        if abs(p[0] - right) < 1e-6 and abs(p[1] - bottom) < 1e-6)
     prev = ring[corner - 1]
     detour = [(right, g_top), (g_left, g_top), (g_left, bottom)]
-    if abs(prev[0] - right) > 1e-6:           # arrived along the bottom edge
+    if abs(prev[0] - right) > 1e-6:  # arrived along the bottom edge
         detour.reverse()
     new_ring = ring[:corner] + detour + ring[corner + 1:]
 
@@ -141,7 +152,7 @@ def main():
 
     open(dst, "w", encoding="utf-8", newline="\n").write(out)
     print(f"glyph at ({g_left:.3f}, {g_top:.3f}) to ({g_right:.3f}, {g_bottom:.3f}); "
-          f"{len(pieces)} added polygon(s)")
+        f"{len(pieces)} added polygon(s)")
 
 
 if __name__ == "__main__":
