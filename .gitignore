@@ -1,0 +1,46 @@
+# Helper scripts, symbol and footprint libraries, and complete KiCad projects or templates.
+
+# For PCBs designed using KiCad: https://www.kicad.org/
+# Format documentation: https://kicad.org/help/file-formats/
+# Scoped to currently supported KiCad. Pre-6 artifacts are not generated any more and have
+# been dropped: *.000, *.bck, *-cache* (the v5 symbol cache), *.kicad_pcb-bak and
+# *.kicad_sch-bak (superseded by *-backups/*.zip), *-bak, *-bak*, _autosave-*,
+# \#auto_saved_files\#, *-save.pro and *-save.kicad_pcb (.pro was the v5 project format).
+
+# Temporary and lock files
+*.bak
+*.tmp
+*~
+~*
+~*.lck
+fp-info-cache
+
+# Backups and local history
+*-backups
+**/*-backups/*.zip
+_restore_backup_*/
+.history
+
+# Netlist files (exported from Eeschema)
+*.net
+
+# Autorouter files (exported from Pcbnew)
+*.dsn
+*.ses
+
+# Exported BOM files. Off here: this repo also holds scripts and libraries whose own data
+# files use these extensions, and a pattern hiding a file you meant to add gives no warning.
+#*.xml
+#*.csv
+
+# Local project settings
+*.kicad_prl
+
+# Python helper scripts
+__pycache__/
+*.py[cod]
+
+# OS
+Thumbs.db
+desktop.ini
+.DS_Store
