@@ -40,7 +40,8 @@ Modes
   ki-diff <kicad-diff.py args>            Pass everything through to kicad-diff.py.
   ki-diff --fork OLD NEW                  Diff two files and open the PDF. For Fork.
   ki-diff --git-diff <7 git args>         git external-diff driver. Called by git.
-  ... --all-layers                       Either of those, keeping unchanged layers too.
+  ki-diff --fork --resolution N OLD NEW   The same, rendered at N DPI.
+  ... --all-layers                        Either of those, with unchanged layers too.
   ki-diff --selftest                      Check that KiDiff and its dependencies resolve.
   ki-diff --clean [cache|pdfs|all]        List, or remove, what previous runs left behind.
   ki-diff                                 Print this help.
@@ -82,7 +83,15 @@ Setting up Fork
   Preferences -> Integration -> Diff Tools -> add one:
       Title:        KiDiff (PCB)
       Path:         C:\\programs\\ki-diff.cmd
-      Arguments:    --fork $LOCAL $REMOTE          (add --all-layers before $LOCAL for all)
+      Arguments:    --fork $LOCAL $REMOTE
+
+  Register one entry per resolution you want, each with its own title:
+
+      Arguments:    --fork --resolution 400 $LOCAL $REMOTE
+
+  --all-layers before $LOCAL keeps the layers that did not change. The resolution is part of
+  the PDF name, so entries at different DPI do not overwrite each other, and they share one
+  set of plots in the cache: changing DPI re-rasterizes but never re-plots.
 
   Fork lists every registered tool in its External Diff submenu, so pick this one on
   .kicad_pcb files. $LOCAL is the left/older side; swap the two if the colors come out
@@ -94,6 +103,7 @@ PCB_EXT = ".kicad_pcb"
 SCH_EXT = ".kicad_sch"
 CACHE_NAME = "kicad-git-cache"
 RELAUNCH_FLAG = "KIDIFF_UNDER_KICAD_PYTHON"
+MODES = ("--fork", "--git-diff", "--selftest", "--clean")
 
 
 def die(message, code=1):
@@ -320,10 +330,18 @@ def mode_git_diff(argv):
 
 
 def mode_fork(argv):
-    """Fork external diff tool: two file paths, then open the resulting PDF."""
-    all_layers = bool(argv) and argv[0] == "--all-layers"
-    if all_layers:
-        argv = argv[1:]
+    """Fork external diff tool: options, two file paths, then open the resulting PDF."""
+    all_layers, resolution = False, None
+    while argv and argv[0].startswith("-"):
+        if argv[0] == "--all-layers":
+            all_layers, argv = True, argv[1:]
+        elif argv[0] == "--resolution" and len(argv) > 1:
+            resolution, argv = argv[1], argv[2:]
+            if not resolution.isdigit():
+                die("--resolution wants a number of DPI, got %r" % resolution)
+        else:
+            die("--fork takes --all-layers and --resolution N before the two file paths;"
+                " got %r" % argv[0])
     if len(argv) < 2:
         die("--fork needs two file paths; got %d. In Fork, pass its two file placeholders."
             % len(argv))
@@ -344,7 +362,10 @@ def mode_fork(argv):
 
     key = hashlib.sha1((os.path.abspath(old_file) + "|" +
         os.path.abspath(new_file)).encode("utf-8")).hexdigest()[:8]
-    out_name = "%s_%s.pdf" % (safe_name(os.path.basename(new_file))[:60], key)
+    # The resolution is part of the name, so Fork entries at different DPI keep their
+    # own PDFs instead of overwriting one another.
+    tag = "" if resolution is None else "_r" + resolution
+    out_name = "%s_%s%s.pdf" % (safe_name(os.path.basename(new_file))[:60], key, tag)
 
     # Diffing the same pair twice is normal here, and the viewer opened last time still holds
     # that PDF, so ImageMagick cannot overwrite it and the stale file would be shown as new.
@@ -359,6 +380,8 @@ def mode_fork(argv):
         args = ["--cache_dir", out_dir, "--output_dir", out_dir, "--output_name", out_name]
         if not all_layers:
             args.append("--only_different")
+        if resolution is not None:
+            args += ["--resolution", resolution]
         args += [as_kicad_file(old_file, ext, workdir, "old"),
             as_kicad_file(new_file, ext, workdir, "new")]
         code = run_kicad_diff(args, out_dir)
@@ -555,6 +578,9 @@ def main():
         return mode_selftest()
     if argv[0] == "--":
         return mode_passthrough(argv[1:])
+    if not argv[0].startswith("-") and not os.path.isfile(argv[0]) and "--" + argv[0] in MODES:
+        die("did you mean --%s? A bare word is passed to kicad-diff.py as a file name."
+            % argv[0])
     return mode_passthrough(argv)
 
 
