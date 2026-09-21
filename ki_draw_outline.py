@@ -572,6 +572,11 @@ def main():
     if not dst.endswith(".kicad_sch"):
         sys.exit("the target must be a .kicad_sch or a .kicad_mod")
 
+    # The sheet is read and written back, so its line endings must survive. Reading
+    # stays universal so the rest of the code sees one convention, and the original is
+    # restored on the way out: KiCad writes CRLF on Windows, and converting every line
+    # would bury the real change and bounce back on the next save.
+    sheet_eol = "\r\n" if b"\r\n" in open(dst, "rb").read() else "\n"
     sheet = open(dst, encoding="utf-8", errors="replace").read()
     shutil.copyfile(dst, dst + ".BAK")
 
@@ -592,7 +597,7 @@ def main():
         for ref in args.refs:
             sheet = add_picture(board, sheet, ref, args)
 
-    open(dst, "w", encoding="utf-8", newline="\n").write(sheet)
+    open(dst, "w", encoding="utf-8", newline=sheet_eol).write(sheet)
 
 
 def add_picture(board, sheet, ref, args):
