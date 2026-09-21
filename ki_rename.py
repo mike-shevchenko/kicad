@@ -273,12 +273,15 @@ def main():
         return "".join(out)
 
     for path in files:
-        text = open(path, encoding="utf-8", errors="replace").read()
+        # newline="" both ways: without it the read translates CRLF to LF and the write
+        # pins LF, so a one-string rename rewrites every line of a CRLF file. KiCad on
+        # Windows writes CRLF, so that would bounce back and forth through the history.
+        text = open(path, encoding="utf-8", errors="replace", newline="").read()
         new = STRING.sub(lambda m: '"' + replace(m.group(1)) + '"', text)
         if new == text:
             continue
         shutil.copyfile(path, path + ".BAK")
-        open(path, "w", encoding="utf-8", newline="\n").write(new)
+        open(path, "w", encoding="utf-8", newline="").write(new)
         print(f"Written: {path}.")
 
 
