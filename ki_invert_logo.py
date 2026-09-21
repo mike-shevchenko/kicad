@@ -10,8 +10,8 @@ inside the letters) is resolved by splitting the polygon vertically through
 the hole until every piece is simply connected.
 """
 # Written with the help of Claude Opus 5.
-# Wrappers on PATH: ki-invert-logo.cmd for cmd.exe, Fork and git; ki-invert-logo for
-# cygwin and git-bash, which converts POSIX paths first. Create them with ki_install.py.
+# Wrappers on PATH: ki-invert-logo.cmd for cmd.exe, ki-invert-logo for cygwin and git-bash.
+# Create them with ki_install.py.
 
 import argparse
 import re

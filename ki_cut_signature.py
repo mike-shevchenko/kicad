@@ -14,8 +14,8 @@ KiCad polygons have no holes, so the cut is done in two parts:
 The union of the two is the original shape minus the glyph.
 """
 # Written with the help of Claude Opus 5.
-# Wrappers on PATH: ki-cut-signature.cmd for cmd.exe, Fork and git; ki-cut-signature for
-# cygwin and git-bash, which converts POSIX paths first. Create them with ki_install.py.
+# Wrappers on PATH: ki-cut-signature.cmd for cmd.exe, ki-cut-signature for cygwin and git-bash.
+# Create them with ki_install.py.
 
 import argparse
 import re

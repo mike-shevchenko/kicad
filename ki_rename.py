@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Rename a string in every KiCad file of the current project. See --help."""
 # Written with the help of Claude Opus 5.
-# Wrappers on PATH: ki-rename.cmd for cmd.exe, Fork and git; ki-rename for
-# cygwin and git-bash, which converts POSIX paths first. Create them with ki_install.py.
+# Wrappers on PATH: ki-rename.cmd for cmd.exe, ki-rename for cygwin and git-bash.
+# Create them with ki_install.py.
 
 import argparse
 import ast

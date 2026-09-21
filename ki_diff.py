@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Windows launcher for KiDiff: CLI passthrough, git diff driver, Fork diff tool. See --help."""
 # Written with the help of Claude Opus 5.
-# Wrappers on PATH: ki-diff.cmd for cmd.exe, Fork and git; ki-diff for
-# cygwin and git-bash, which converts POSIX paths first. Create them with ki_install.py.
+# Wrappers on PATH: ki-diff.cmd for cmd.exe, and for Fork and git, which launch it
+# by name; ki-diff for cygwin and git-bash. Create them with ki_install.py.
 
 import argparse
 import hashlib

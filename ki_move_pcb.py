@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Move a KiCad board on its sheet, and verify that a move changed nothing else."""
 # Written with the help of Claude Opus 5.
-# Wrappers on PATH: ki-move-pcb.cmd for cmd.exe, Fork and git; ki-move-pcb for
-# cygwin and git-bash, which converts POSIX paths first. Create them with ki_install.py.
+# Wrappers on PATH: ki-move-pcb.cmd for cmd.exe, ki-move-pcb for cygwin and git-bash.
+# Create them with ki_install.py.
 
 import argparse
 import glob

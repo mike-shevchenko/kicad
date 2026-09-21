@@ -49,9 +49,9 @@ Why two of them
   and git-bash ignore PATHEXT and need a file named exactly as typed, so they get the
   extensionless one, which first rewrites absolute POSIX paths for the native Python.
 
-  Anything launching a program through CreateProcess - Fork's external diff tool, and git's
-  diff driver - must name the .cmd explicitly. An extensionless file cannot be executed that
-  way at all, even given its full path.
+  Anything launching a program through CreateProcess must name the .cmd explicitly, since an
+  extensionless file cannot be executed that way at all, even given its full path. Of these
+  scripts only ki-diff is launched like that, by Fork and by git's diff driver.
 
   Any python on PATH will do. A script needing KiCad's own interpreter re-runs itself under it.
 

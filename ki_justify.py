@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Change a text or field justification without moving what you see on the board."""
 # Written with the help of Claude Opus 5.
-# Wrappers on PATH: ki-justify.cmd for cmd.exe, Fork and git; ki-justify for
-# cygwin and git-bash, which converts POSIX paths first. Create them with ki_install.py.
+# Wrappers on PATH: ki-justify.cmd for cmd.exe, ki-justify for cygwin and git-bash.
+# Create them with ki_install.py.
 
 import argparse
 import glob

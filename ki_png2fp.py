@@ -13,8 +13,8 @@ Horizontally adjacent pixels are merged into single rectangles, which keeps
 the file small without changing the geometry.
 """
 # Written with the help of Claude Opus 5.
-# Wrappers on PATH: ki-png2fp.cmd for cmd.exe, Fork and git; ki-png2fp for
-# cygwin and git-bash, which converts POSIX paths first. Create them with ki_install.py.
+# Wrappers on PATH: ki-png2fp.cmd for cmd.exe, ki-png2fp for cygwin and git-bash.
+# Create them with ki_install.py.
 
 from PIL import Image
 import argparse
