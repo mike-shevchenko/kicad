@@ -14,9 +14,12 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import zipfile
 import zlib
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
+from functools import partial
 
 # The imaging is pure Python. pypdfium2 ships its renderer inside the wheel, so nothing has
 # to be installed outside pip. scipy is optional and only makes one step quicker.
@@ -200,9 +203,16 @@ REVISION = re.compile(r'\(rev\s+"([^"]*)"\)')
 PRODUCED = re.compile(r"^\s*(?:[-*]\s+)?(\S+)\s+produced\b", re.MULTILINE)
 
 
+class Failure(Exception):
+    """A reported error. Raised rather than exiting, so it unwinds a worker thread too."""
+
+    def __init__(self, message, code):
+        Exception.__init__(self, message)
+        self.code = code
+
+
 def die(message, code=2):
-    sys.stderr.write("[release] " + message + "\n")
-    sys.exit(code)
+    raise Failure(message, code)
 
 
 def shown(path):
@@ -239,11 +249,36 @@ def find_kicad_cli():
 
 KICAD_CLI = None
 
+# The build is subprocesses and C code that release the GIL, so threads are enough to fill
+# the cores. kicad-cli runs are held to fewer lanes than that, since each loads the board
+# and, for the renders and the STEP model, its 3D models as well.
+WORKERS = os.cpu_count() or 4
+KICAD_LANES = threading.Semaphore(8)
+
+# PDFium is not thread-safe, so plots are rasterized one at a time. That is a small part
+# of the work, and everything around it still runs in parallel.
+PDFIUM_LOCK = threading.Lock()
+
+
+def parallel(jobs):
+    """Run the jobs on worker threads, and return their results in the same order.
+
+    A failed job is raised here once the others have finished: a kicad-cli process cannot
+    be stopped once started, and a job cut short would leave half-written files behind.
+    """
+    jobs = list(jobs)
+    if len(jobs) <= 1:
+        return [job() for job in jobs]
+    with ThreadPoolExecutor(max_workers=min(len(jobs), WORKERS)) as pool:
+        futures = [pool.submit(job) for job in jobs]
+        return [future.result() for future in futures]
+
 
 def run(command, quiet=True):
     """Run a command, and fail loudly with its own output when it does."""
-    result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-        universal_newlines=True)
+    with KICAD_LANES:
+        result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            universal_newlines=True)
     if result.returncode:
         sys.stderr.write(result.stdout or "")
         die("%s failed with status %d" % (os.path.basename(command[0]), result.returncode))
@@ -412,11 +447,12 @@ def fab_hash_of_tag(project, tag):
 
 def render_plot(pdf, density):
     """One plot as a grayscale page: black artwork on white paper."""
-    document = pypdfium2.PdfDocument(pdf)
-    try:
-        return document[0].render(scale=density / 72.0).to_pil().convert("L")
-    finally:
-        document.close()
+    with PDFIUM_LOCK:
+        document = pypdfium2.PdfDocument(pdf)
+        try:
+            return document[0].render(scale=density / 72.0).to_pil().convert("L")
+        finally:
+            document.close()
 
 
 def artwork(pdf, density):
@@ -457,13 +493,18 @@ class Plotter:
         self.made = {}
 
     def plot(self, wanted):
-        """Make every requested plot not made yet."""
+        """Make every requested plot not made yet, the runs side by side.
+
+        Not locked: the build requests everything it will need in one call before any
+        thread asks for a plot, so later calls only read what is already made.
+        """
         groups = {}
         for name, mirror, drill in wanted:
             if (name, mirror, drill) not in self.made:
                 groups.setdefault((mirror, drill), []).append(name)
-        for (mirror, drill), names in sorted(groups.items()):
-            self.batch(names, mirror, drill)
+        for made in parallel(partial(self.batch, names, mirror, drill)
+                for (mirror, drill), names in sorted(groups.items())):
+            self.made.update(made)
 
     def one(self, name, mirror, drill):
         """The PDF of one plot, made now if it was not requested before."""
@@ -484,11 +525,13 @@ class Plotter:
         if mirror:
             command.append("--mirror")
         run(command + ["-o", directory, self.pcb])
+        made = {}
         for name in names:
             pdf = os.path.join(directory, "%s-%s.pdf" % (self.stem, name.replace(".", "_")))
             if not os.path.exists(pdf):
                 die("kicad-cli did not write %s" % shown(pdf))
-            self.made[name, mirror, drill] = pdf
+            made[name, mirror, drill] = pdf
+        return made
 
 
 def tint(pdf, color, alpha, density):
@@ -561,8 +604,8 @@ def side_image(plotter, stack, mirror):
 
 def build_board_image(project, outdir, tag, plotter):
     """The deliverable image: front on the left, back mirrored on the right."""
-    front = side_image(plotter, FRONT_STACK, False)
-    back = side_image(plotter, BACK_STACK, True)
+    front, back = parallel([partial(side_image, plotter, FRONT_STACK, False),
+        partial(side_image, plotter, BACK_STACK, True)])
 
     gutter = int(round(front.width * GUTTER))
     canvas = Image.new("RGB", (front.width + gutter + back.width,
@@ -603,13 +646,14 @@ def render(pcb, out_png, side, tilted, aspect):
 
 
 def build_renders(project, outdir, tag, aspect):
-    made = []
+    made, jobs = [], []
     for side in ("top", "bottom"):
         for tilted in (False, True):
             suffix = "3d-%s%s.png" % (side, "-tilt" if tilted else "")
             out = os.path.join(outdir, project.asset(tag, suffix))
-            render(project.pcb, out, side, tilted, aspect)
             made.append(out)
+            jobs.append(partial(render, project.pcb, out, side, tilted, aspect))
+    parallel(jobs)
     return made
 
 
@@ -625,28 +669,19 @@ def build_gerbers(project, outdir, tag, work):
     return out, digest
 
 
-def build_documents(project, outdir, tag, plotter):
-    """Schematic, layer plots, model and the two machine-readable lists."""
-    made = []
-    if project.sch:
-        out = os.path.join(outdir, project.asset(tag, "schematic.pdf"))
-        run([KICAD_CLI, "sch", "export", "pdf", "-o", out, project.sch])
-        made.append(out)
-        out = os.path.join(outdir, project.asset(tag, "bom.csv"))
-        run([KICAD_CLI, "sch", "export", "bom", "-o", out, project.sch])
-        made.append(out)
+def kicad_export(project, outdir, tag, suffix, arguments, source):
+    """One kicad-cli export straight into the release directory."""
+    out = os.path.join(outdir, project.asset(tag, suffix))
+    run([KICAD_CLI] + arguments + ["-o", out, source])
+    return out
 
-    made.append(build_layers_pdf(project, outdir, tag, plotter))
 
-    out = os.path.join(outdir, project.asset(tag, "model.step"))
-    run([KICAD_CLI, "pcb", "export", "step", "--no-dnp", "-o", out, project.pcb])
-    made.append(out)
-
-    out = os.path.join(outdir, project.asset(tag, "pos.csv"))
-    run([KICAD_CLI, "pcb", "export", "pos", "--format", "csv", "--units", "mm",
-        "--side", "both", "-o", out, project.pcb])
-    made.append(out)
-    return made
+def build_artwork(project, outdir, tag, plotter):
+    """The board image and the layer document, which are made from the same plots."""
+    plotter.plot(side_plots(FRONT_STACK, False) + side_plots(BACK_STACK, True)
+        + document_plots(plotter))
+    return parallel([partial(build_board_image, project, outdir, tag, plotter),
+        partial(build_layers_pdf, project, outdir, tag, plotter)])
 
 
 def substrate(plotter, mirror):
@@ -725,6 +760,13 @@ def layer_page(name, mask, under, out_png):
     page.convert("RGB").save(out_png)
 
 
+def compressed_image(path):
+    """An image file as its size and its raw RGB bytes deflated, the slow part of a page."""
+    image = Image.open(path).convert("RGB")
+    width, height = image.size
+    return width, height, zlib.compress(image.tobytes(), 9)
+
+
 def write_pdf(pages, out, density):
     """Assemble full-page images into a PDF, each one losslessly compressed.
 
@@ -746,9 +788,8 @@ def write_pdf(pages, out, density):
     kids = " ".join("%d 0 R" % (first + n * 3) for n in range(len(pages)))
     add(b"<< /Type /Catalog /Pages 2 0 R >>")
     add(("<< /Type /Pages /Count %d /Kids [%s] >>" % (len(pages), kids)).encode())
-    for index, path in enumerate(pages):
-        image = Image.open(path).convert("RGB")
-        width, height = image.size
+    for index, (width, height, data) in enumerate(parallel(
+            partial(compressed_image, path) for path in pages)):
         across, down = width * 72.0 / density, height * 72.0 / density
         base = first + index * 3
         add(("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 %.2f %.2f]"
@@ -756,7 +797,6 @@ def write_pdf(pages, out, density):
             % (across, down, base + 2, base + 1)).encode())
         draw = ("q %.2f 0 0 %.2f 0 0 cm /Im0 Do Q" % (across, down)).encode()
         add(("<< /Length %d >>\nstream\n" % len(draw)).encode() + draw + b"\nendstream")
-        data = zlib.compress(image.tobytes(), 9)
         add(("<< /Type /XObject /Subtype /Image /Width %d /Height %d /ColorSpace"
             " /DeviceRGB /BitsPerComponent 8 /Filter /FlateDecode /Length %d >>\nstream\n"
             % (width, height, len(data))).encode() + data + b"\nendstream")
@@ -783,8 +823,11 @@ def document_plots(plotter):
 def build_layers_pdf(project, outdir, tag, plotter):
     """One page per layer, back layers mirrored as if seen through the board."""
     plotter.plot(document_plots(plotter))
-    bodies = {False: substrate(plotter, False), True: substrate(plotter, True)}
-    outlines = {False: outline(plotter, False), True: outline(plotter, True)}
+    front, back, front_outline, back_outline = parallel([partial(substrate, plotter, False),
+        partial(substrate, plotter, True), partial(outline, plotter, False),
+        partial(outline, plotter, True)])
+    bodies = {False: front, True: back}
+    outlines = {False: front_outline, True: back_outline}
     fades = {False: faded(bodies[False]), True: faded(bodies[True])}
     # Pages of a pair face each other in a two-page view only while nothing single-sided
     # comes between them, so Edge.Cuts, Margin and the User layers collect at the back. A
@@ -796,13 +839,12 @@ def build_layers_pdf(project, outdir, tag, plotter):
         + [name for name in names if counterpart(name) not in present])
     # Rasterized and judged before any page is built, because whether an empty layer
     # deserves a placeholder depends on a layer that may come later.
-    masks, bare = {}, {}
-    for name in layers:
-        mirror = name.startswith("B.")
-        masks[name] = artwork(plotter.one(name, mirror, default_drill(name)), DPI)
-        bare[name] = not masks[name].getbbox()
+    masks = dict(zip(layers, parallel(
+        partial(artwork, plotter.one(name, name.startswith("B."), default_drill(name)), DPI)
+        for name in layers)))
+    bare = dict((name, not masks[name].getbbox()) for name in layers)
 
-    pages, dropped, placed = [], [], []
+    pages, jobs, dropped, placed = [], [], [], []
     for name in layers:
         mirror = name.startswith("B.")
         page = os.path.join(plotter.work, "%02d-%s.png" % (len(pages), name))
@@ -811,7 +853,7 @@ def build_layers_pdf(project, outdir, tag, plotter):
                 dropped.append(name)
                 continue
             placed.append(name)
-            blank_page(name, bodies[mirror].size, page)
+            jobs.append(partial(blank_page, name, bodies[mirror].size, page))
             pages.append(page)
             continue
         if name in OUTLINE_ONLY:
@@ -820,8 +862,9 @@ def build_layers_pdf(project, outdir, tag, plotter):
             under = fades[mirror]
         else:
             under = bodies[mirror]
-        layer_page(name, masks[name], under, page)
+        jobs.append(partial(layer_page, name, masks[name], under, page))
         pages.append(page)
+    parallel(jobs)
     if dropped:
         print("  nothing on %s, so no page for %s"
             % (", ".join(dropped), "them" if len(dropped) > 1 else "it"))
@@ -1005,13 +1048,24 @@ def do_build(project, tag, what):
         elif what == "render":
             made = build_renders(project, outdir, tag, aspect)
         else:
-            # Everything the image and the document will ask for, plotted in one go.
-            plotter.plot(side_plots(FRONT_STACK, False) + side_plots(BACK_STACK, True)
-                + document_plots(plotter))
-            zipped, digest = build_gerbers(project, outdir, tag, work)
-            made = [zipped, build_board_image(project, outdir, tag, plotter)]
-            made += build_renders(project, outdir, tag, aspect)
-            made += build_documents(project, outdir, tag, plotter)
+            # Every stage at once. The STEP export is the longest single step, and the
+            # artwork chain the longest run of Python; everything else hides behind them.
+            jobs = [partial(build_gerbers, project, outdir, tag, work),
+                partial(build_artwork, project, outdir, tag, plotter),
+                partial(build_renders, project, outdir, tag, aspect),
+                partial(kicad_export, project, outdir, tag, "model.step",
+                    ["pcb", "export", "step", "--no-dnp"], project.pcb),
+                partial(kicad_export, project, outdir, tag, "pos.csv",
+                    ["pcb", "export", "pos", "--format", "csv", "--units", "mm",
+                    "--side", "both"], project.pcb)]
+            if project.sch:
+                jobs += [partial(kicad_export, project, outdir, tag, "schematic.pdf",
+                        ["sch", "export", "pdf"], project.sch),
+                    partial(kicad_export, project, outdir, tag, "bom.csv",
+                        ["sch", "export", "bom"], project.sch)]
+            results = parallel(jobs)
+            (zipped, digest), (image, layers), renders = results[:3]
+            made = [zipped, image] + renders + results[5:] + [layers] + results[3:5]
             path, _record = write_build_json(project, outdir, tag, digest, scale, made)
             made.append(path)
         for path in sorted(made):
@@ -1157,4 +1211,8 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except Failure as failure:
+        sys.stderr.write("[release] %s\n" % failure)
+        sys.exit(failure.code)
