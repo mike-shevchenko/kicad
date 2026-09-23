@@ -4,8 +4,7 @@
 See --help for the modes, the specification language and the options.
 """
 # Written with the help of Claude Opus 5.
-# Wrappers on PATH: ki-draw-outline.cmd for cmd.exe, ki-draw-outline for cygwin and git-bash.
-# Create them with ki_install.py.
+# Run as "ki draw-outline" through the ki launcher, or directly as "python ki_draw_outline.py".
 
 import argparse
 import glob
@@ -15,6 +14,8 @@ import re
 import shutil
 import sys
 import uuid
+
+from ki_lib import exit_with, form_end, help_formatter
 
 DESCRIPTION = "Draw a connector on a schematic sheet, or make a footprint for one."
 
@@ -34,12 +35,12 @@ Arguments
 Both files may be left out inside a project directory, where the only .kicad_pcb and the only
 .kicad_sch are taken. Drawing a connector from the project's board onto its sheet is then just
 
-  ki-draw-outline XP1
+  ki draw-outline XP1
 
 Order does not matter, because each argument is identified by what it is, so these agree:
 
-  ki-draw-outline board.kicad_pcb sheet.kicad_sch XP1 J2
-  ki-draw-outline XP1 J2 sheet.kicad_sch board.kicad_pcb
+  ki draw-outline board.kicad_pcb sheet.kicad_sch XP1 J2
+  ki draw-outline XP1 J2 sheet.kicad_sch board.kicad_pcb
 
 Modes
 
@@ -89,36 +90,6 @@ SHAPES = ("fp_line", "fp_rect", "fp_poly", "fp_circle", "fp_arc")
 # Width of one character as a fraction of the font size, used to center a
 # label on its pad. KiCad's stroke font advances about 0.8 of the size per
 # character; too small a value pushes labels to the right.
-
-
-def form_end(text, start):
-    """Index just past the closing paren of the form starting at `start`.
-
-    Parentheses inside quoted strings are ignored, so a specification or a
-    text item containing one does not throw the count off.
-    """
-    depth = 0
-    i = start
-    in_string = False
-    while i < len(text):
-        c = text[i]
-        if in_string:
-            if c == '\\':
-                i += 2
-                continue
-            if c == '"':
-                in_string = False
-        elif c == '"':
-            in_string = True
-        elif c == '(':
-            depth += 1
-        elif c == ')':
-            depth -= 1
-            if depth == 0:
-                return i + 1
-        i += 1
-    line = text.count("\n", 0, start) + 1
-    raise ValueError(f"unbalanced parentheses in the form starting at line {line}")
 
 
 def blocks(text, tag):
@@ -521,10 +492,10 @@ def only_file(pattern, what):
 
 def main():
     ap = argparse.ArgumentParser(
-        prog="ki-draw-outline",
+        prog="ki draw-outline",
         description=DESCRIPTION,
         epilog=EPILOG,
-        formatter_class=lambda prog: argparse.RawDescriptionHelpFormatter(prog, width=99))
+        formatter_class=help_formatter)
     ap.add_argument("words", nargs="*", metavar="SOURCE TARGET REF",
         help="the source and target files and the footprint references; each is "
         "recognized by what it is, and the files may be omitted inside a "
@@ -689,4 +660,4 @@ def place(sheet, title, shapes, pads, args, note):
 
 
 if __name__ == "__main__":
-    main()
+    exit_with(main)

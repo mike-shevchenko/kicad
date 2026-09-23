@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """Rename a string in every KiCad file of the current project. See --help."""
 # Written with the help of Claude Opus 5.
-# Wrappers on PATH: ki-rename.cmd for cmd.exe, ki-rename for cygwin and git-bash.
-# Create them with ki_install.py.
+# Run as "ki rename" through the ki launcher, or directly as "python ki_rename.py".
 
 import argparse
 import ast
@@ -11,6 +10,8 @@ import re
 import shutil
 import sys
 from collections import Counter
+
+from ki_lib import exit_with, help_formatter
 
 DESCRIPTION = "Rename a string in every KiCad file of the current directory."
 
@@ -60,10 +61,10 @@ Other options
 
 Examples
 
-  ki-rename J9 J1
-  ki-rename J9 J1 -v
-  ki-rename J9 J1 -e 3 4 7
-  ki-rename J9 J1 -e 3 4 7 -f
+  ki rename J9 J1
+  ki rename J9 J1 -v
+  ki rename J9 J1 -e 3 4 7
+  ki rename J9 J1 -e 3 4 7 -f
 """
 
 SUFFIXES = (".kicad_sch", ".kicad_pcb", ".kicad_mod", ".kicad_pro", ".kicad_prl",
@@ -195,9 +196,9 @@ def resolve_exclusions(items, path, order):
 
 def main():
     ap = argparse.ArgumentParser(
-        prog="ki-rename",
+        prog="ki rename",
         description=DESCRIPTION, epilog=EPILOG,
-        formatter_class=lambda prog: argparse.RawDescriptionHelpFormatter(prog, width=99))
+        formatter_class=help_formatter)
     ap.add_argument("sample", metavar="SAMPLE", help="the string to rename")
     ap.add_argument("replacement", metavar="REPLACEMENT", help="what to rename it to")
     ap.add_argument("-e", "--exclude", action="append", nargs="+", default=[],
@@ -286,4 +287,5 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    exit_with(main)
+

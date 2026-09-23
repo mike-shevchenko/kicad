@@ -3,7 +3,7 @@
 Convert a 1-bit-style PNG into a KiCad footprint of exact pixel rectangles
 on F.Mask.
 
-    ki-png2fp logo.png ->  logo.kicad_mod
+    ki png2fp logo.png ->  logo.kicad_mod
 
 Dark pixels (< 128) become mask openings. The physical pixel size comes from
 the PNG's own DPI metadata; set it in Photoshop via Image > Image Size >
@@ -13,14 +13,14 @@ Horizontally adjacent pixels are merged into single rectangles, which keeps
 the file small without changing the geometry.
 """
 # Written with the help of Claude Opus 5.
-# Wrappers on PATH: ki-png2fp.cmd for cmd.exe, ki-png2fp for cygwin and git-bash.
-# Create them with ki_install.py.
+# Run as "ki png2fp" through the ki launcher, or directly as "python ki_png2fp.py".
 
 from PIL import Image
 import argparse
 import os
-import sys
 import uuid
+
+from ki_lib import exit_with, help_formatter
 
 LAYER = "F.Mask"
 THRESHOLD = 128
@@ -29,8 +29,8 @@ DEFAULT_DPI = 84.666666  # 0.3 mm per pixel, used only if the PNG has no DPI
 
 def main():
     parser = argparse.ArgumentParser(
-        prog="ki-png2fp", description=__doc__,
-        formatter_class=lambda prog: argparse.RawDescriptionHelpFormatter(prog, width=99))
+        prog="ki png2fp", description=__doc__,
+        formatter_class=help_formatter)
     parser.add_argument("image", metavar="IMAGE.png",
         help="1-bit-style PNG; dark pixels become mask openings")
     parser.add_argument("-o", "--output", metavar="OUT.kicad_mod",
@@ -100,4 +100,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    exit_with(main)

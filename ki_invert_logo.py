@@ -3,20 +3,21 @@
 Invert a knocked-out logo footprint: the letters become the filled shapes
 instead of the background, and the pixel signature is added as filled pixels.
 
-    ki-invert-logo AGAT-LOGO-10mm.kicad_mod out.kicad_mod [name]
+    ki invert-logo AGAT-LOGO-10mm.kicad_mod out.kicad_mod [name]
 
 KiCad polygons cannot have holes, so any hole left by inversion (the counters
 inside the letters) is resolved by splitting the polygon vertically through
 the hole until every piece is simply connected.
 """
 # Written with the help of Claude Opus 5.
-# Wrappers on PATH: ki-invert-logo.cmd for cmd.exe, ki-invert-logo for cygwin and git-bash.
-# Create them with ki_install.py.
+# Run as "ki invert-logo" through the ki launcher, or directly as "python ki_invert_logo.py".
 
 import argparse
 import re
 import sys
 import uuid
+
+from ki_lib import exit_with, form_end, help_formatter
 
 PIXEL = 0.15
 MARGIN = 1
@@ -28,18 +29,6 @@ GLYPH = [
     "# # #",
     "# # #",
     ]
-
-
-def form_end(text, start):
-    depth = 0
-    for i in range(start, len(text)):
-        if text[i] == '(':
-            depth += 1
-        elif text[i] == ')':
-            depth -= 1
-            if depth == 0:
-                return i + 1
-    raise ValueError("unbalanced parentheses")
 
 
 def parse_polys(text):
@@ -97,8 +86,8 @@ def fmt_poly(pts, layer):
 
 def main():
     parser = argparse.ArgumentParser(
-        prog="ki-invert-logo", description=__doc__,
-        formatter_class=lambda prog: argparse.RawDescriptionHelpFormatter(prog, width=99))
+        prog="ki invert-logo", description=__doc__,
+        formatter_class=help_formatter)
     parser.add_argument("source", metavar="IN.kicad_mod",
         help="knocked-out logo footprint to invert")
     parser.add_argument("output", metavar="OUT.kicad_mod",
@@ -107,9 +96,9 @@ def main():
         help="footprint name to store (default: LOGO-INV)")
     args = parser.parse_args()
     # Imported here, not at the top, so --help works without the dependency.
-    global Polygon, box, MultiPolygon, unary_union
+    global Polygon, box, unary_union
     try:
-        from shapely.geometry import Polygon, box, MultiPolygon
+        from shapely.geometry import Polygon, box
         from shapely.ops import unary_union
     except ImportError:
         sys.exit("this script needs shapely: python -m pip install shapely")
@@ -160,4 +149,5 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    exit_with(main)
+

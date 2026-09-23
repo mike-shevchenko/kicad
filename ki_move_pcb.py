@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
 """Move a KiCad board on its sheet, and verify that a move changed nothing else."""
 # Written with the help of Claude Opus 5.
-# Wrappers on PATH: ki-move-pcb.cmd for cmd.exe, ki-move-pcb for cygwin and git-bash.
-# Create them with ki_install.py.
+# Run as "ki move-pcb" through the ki launcher, or directly as "python ki_move_pcb.py".
 
 import argparse
-import glob
 import os
 import re
 import subprocess
-import sys
 import tempfile
+
+from ki_lib import default_board, die, ensure_kicad_python, exit_with, help_formatter, note
 
 # pcbnew is imported lazily, inside the centering path only: --cmp is purely textual and has
 # to run under any Python, while --center needs KiCad's own interpreter.
@@ -20,36 +19,37 @@ DESCRIPTION = "Move a KiCad board on its drawing sheet, or check that a move onl
 EPILOG = """\
 Moving
 
-  ki-move-pcb --center
+  ki move-pcb --center
       Put the board in the middle of the usable area: the sheet minus the frame margin,
       minus a strip along the bottom kept clear for the title block. The widths of both
       come from --margin and --title-block, and the result is rounded to the --snap grid.
 
-  ki-move-pcb --shift DX DY
+  ki move-pcb --shift DX DY
       Move by that many millimeters. Taken literally, with no snapping.
 
-  ki-move-pcb --to X Y [--ref board|aux|grid]
+  ki move-pcb --to X Y [--ref board|aux|grid]
       Move so that the reference point lands exactly on those millimeter coordinates.
       --ref chooses the point: the outline's top-left corner (board, the default), the
       drill/place origin (aux) or the grid origin (grid). No snapping here either.
 
   Any of these acts on --pcb, or on the only .kicad_pcb in the current directory. The whole
   board moves as one rigid body, origins included, so relative coordinates survive, and the
-  result is checked as below before the file is written. Run with no arguments inside the
-  PCB editor's scripting console to center the board open there:
+  result is checked as below before the file is written. To center the board open in the
+  PCB editor, run in its scripting console, naming the directory holding these scripts:
 
-      exec(open('ki_move_pcb.py').read())
+      import sys; sys.path.insert(0, "C:/github/public/kicad")
+      import ki_move_pcb; ki_move_pcb.center_open_board()
 
 Checking a move
 
-  ki-move-pcb --cmp
+  ki move-pcb --cmp
       Compare the last save against the one before it, from KiCad's local history. Use
       --history COMMIT to reach an earlier snapshot.
 
-  ki-move-pcb --cmp --git [COMMIT]
+  ki move-pcb --cmp --git [COMMIT]
       Compare the board on disk against a project revision, HEAD by default.
 
-  ki-move-pcb --cmp OLD.kicad_pcb [NEW.kicad_pcb]
+  ki move-pcb --cmp OLD.kicad_pcb [NEW.kicad_pcb]
       Compare two files. NEW defaults to the board --pcb names.
 
   Save the board before you start moving it. KiCad's local history commits on every save, so
@@ -87,15 +87,6 @@ TOKEN = re.compile(r'\(|\)|"(?:[^"\\]|\\.)*"|[^\s()"]+')
 NUMBER = re.compile(r"-?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?\Z")
 TOLERANCE = 1e-9
 REPORT_LIMIT = 20
-
-
-def die(message, code=2):
-    sys.stderr.write("[move-pcb] " + message + "\n")
-    sys.exit(code)
-
-
-def note(message):
-    sys.stderr.write("[move-pcb] " + message + "\n")
 
 
 # --- textual comparison ---------------------------------------------------------------------
@@ -254,15 +245,6 @@ def read_text(path):
         return handle.read().decode("utf-8", "replace")
 
 
-def default_board():
-    hits = sorted(glob.glob("*.kicad_pcb"))
-    if len(hits) == 1:
-        return hits[0]
-    if not hits:
-        die("no .kicad_pcb here; name one explicitly")
-    die("several .kicad_pcb here (%s); name one explicitly" % ", ".join(hits))
-
-
 def from_history(board, commit):
     """Last saved snapshot against an earlier one, from KiCad's local history repository."""
     project = os.path.dirname(os.path.abspath(board)) or "."
@@ -288,34 +270,6 @@ def from_git(board, commit):
 
 
 # --- centering ------------------------------------------------------------------------------
-
-def ensure_kicad_python():
-    """Re-run under KiCad's Python when pcbnew is missing, so any python on PATH will do."""
-    try:
-        import pcbnew  # noqa: F401
-        return
-    except ImportError:
-        pass
-    if os.environ.get("KICAD_PCB_POSITION_RELAUNCHED"):
-        die("pcbnew is still missing under %s; is the KiCad install complete?" % sys.executable)
-    override = os.environ.get("KICAD_PYTHON")
-    found = [override] if override else []
-    for base in (os.environ.get("ProgramFiles", r"C:\Program Files"),
-        os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")):
-        root = os.path.join(base, "KiCad")
-        if not os.path.isdir(root):
-            continue
-        for entry in sorted(os.listdir(root), key=lambda t: [int(p) for p in
-            re.findall(r"\d+", t)] or [0]):
-            found.append(os.path.join(root, entry, "bin", "python.exe"))
-    target = next((p for p in reversed(found) if p and os.path.isfile(p)), None)
-    if not target:
-        die("no KiCad Python found; set KICAD_PYTHON to its python.exe")
-    environment = dict(os.environ, KICAD_PCB_POSITION_RELAUNCHED="1")
-    # subprocess, not execv: on Windows exec detaches and loses the exit status.
-    sys.exit(subprocess.call([target, os.path.realpath(__file__)] + sys.argv[1:],
-        env=environment))
-
 
 def page_size_iu(board, path):
     """Page width/height in internal units.
@@ -452,8 +406,8 @@ def center_open_board():
 
 def build_parser():
     parser = argparse.ArgumentParser(
-        prog="ki-move-pcb", description=DESCRIPTION, epilog=EPILOG,
-        formatter_class=lambda prog: argparse.RawDescriptionHelpFormatter(prog, width=99))
+        prog="ki move-pcb", description=DESCRIPTION, epilog=EPILOG,
+        formatter_class=help_formatter)
     parser.add_argument("--pcb", metavar="FILE.kicad_pcb",
         help="the board to act on; default: the only .kicad_pcb in the current directory")
     parser.add_argument("--center", action="store_true",
@@ -516,7 +470,7 @@ def main():
     if len(modes) > 1:
         die("--center, --shift and --to are alternatives; pick one")
     if modes:
-        ensure_kicad_python()
+        ensure_kicad_python(__file__)
         board = args.pcb or default_board()
         if args.shift:
             choose = lambda _board, _path: shift_delta(*args.shift)  # noqa: E731
@@ -537,4 +491,4 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    exit_with(main)

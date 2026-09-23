@@ -2,7 +2,7 @@
 """
 Cut a pixel-font glyph out of a filled polygon in a KiCad footprint.
 
-    ki-cut-signature AGAT-LOGO-10mm.kicad_mod out.kicad_mod
+    ki cut-signature AGAT-LOGO-10mm.kicad_mod out.kicad_mod
 
 The glyph is placed in the bottom-right corner of the largest polygon,
 one pixel clear of the right and bottom edges.
@@ -14,13 +14,13 @@ KiCad polygons have no holes, so the cut is done in two parts:
 The union of the two is the original shape minus the glyph.
 """
 # Written with the help of Claude Opus 5.
-# Wrappers on PATH: ki-cut-signature.cmd for cmd.exe, ki-cut-signature for cygwin and git-bash.
-# Create them with ki_install.py.
+# Run as "ki cut-signature" through the ki launcher, or directly as "python ki_cut_signature.py".
 
 import argparse
 import re
-import sys
 import uuid
+
+from ki_lib import exit_with, form_end, help_formatter
 
 PIXEL = 0.15
 MARGIN = 1  # margin from the edges, in pixels
@@ -38,19 +38,6 @@ def bbox_area(pts):
     xs = [p[0] for p in pts]
     ys = [p[1] for p in pts]
     return (max(xs) - min(xs)) * (max(ys) - min(ys))
-
-
-def form_end(text, start):
-    """Index just past the closing paren of the form starting at `start`."""
-    depth = 0
-    for i in range(start, len(text)):
-        if text[i] == '(':
-            depth += 1
-        elif text[i] == ')':
-            depth -= 1
-            if depth == 0:
-                return i + 1
-    raise ValueError("unbalanced parentheses")
 
 
 def parse_polys(text):
@@ -99,8 +86,8 @@ def fmt_poly(pts, layer, width=0.0):
 
 def main():
     parser = argparse.ArgumentParser(
-        prog="ki-cut-signature", description=__doc__,
-        formatter_class=lambda prog: argparse.RawDescriptionHelpFormatter(prog, width=99))
+        prog="ki cut-signature", description=__doc__,
+        formatter_class=help_formatter)
     parser.add_argument("source", metavar="IN.kicad_mod",
         help="footprint holding the polygon to cut")
     parser.add_argument("output", metavar="OUT.kicad_mod",
@@ -156,4 +143,5 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    exit_with(main)
+

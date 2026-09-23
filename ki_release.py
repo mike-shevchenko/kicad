@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """Build the release artifacts for a KiCad board, and publish them as a GitHub draft."""
 # Written with the help of Claude Opus 5.
-# Wrappers on PATH: ki-release.cmd for cmd.exe, ki-release for cygwin and git-bash.
-# Create them with ki_install.py.
+# Run as "ki release" through the ki launcher, or directly as "python ki_release.py".
 
 import argparse
 import glob
@@ -21,6 +20,8 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from functools import partial
 
+from ki_lib import die, exit_with, find_kicad_cli, help_formatter, shown
+
 # The imaging is pure Python. pypdfium2 ships its renderer inside the wheel, so nothing has
 # to be installed outside pip. scipy is optional and only makes one step quicker.
 try:
@@ -37,24 +38,24 @@ DESCRIPTION = "Build a KiCad board's release artifacts, and publish them as a Gi
 EPILOG = """\
 Building
 
-  ki-release --png
+  ki release --png
       The board image only: both sides side by side, front on the left, back mirrored as
       if you had flipped the board over. Written into the release directory and opened.
 
-  ki-release --render
+  ki release --render
       The four 3D renders only: each side straight down, and each side tilted under a
       perspective projection so the connectors read. Written and opened.
 
-  ki-release
+  ki release
       Everything: schematic, gerbers, layer plots, the board image, the renders, the STEP
       model, the bill of materials and the placement file. Publishes nothing.
 
-  ki-release --check
+  ki release --check
       Report what a build would produce and stop. No files are written.
 
 Publishing
 
-  ki-release --publish
+  ki release --publish
       Take what is already in the release directory and upload it as a draft release. It
       builds nothing, so review the files first and publish the same bytes you reviewed.
       Run it again after a rebuild and it refreshes that draft in place. The draft's URL
@@ -79,7 +80,7 @@ Versions
 
   A revision is frozen once produced.md records that it was made:
 
-      ki-release --produced JLCPCB 10
+      ki release --produced JLCPCB 10
 
   which appends one line, dated today and naming the newest published release of this
   revision:
@@ -201,50 +202,6 @@ fabrication output may no longer change, because boards carrying it exist.
 
 REVISION = re.compile(r'\(rev\s+"([^"]*)"\)')
 PRODUCED = re.compile(r"^\s*(?:[-*]\s+)?(\S+)\s+produced\b", re.MULTILINE)
-
-
-class Failure(Exception):
-    """A reported error. Raised rather than exiting, so it unwinds a worker thread too."""
-
-    def __init__(self, message, code):
-        Exception.__init__(self, message)
-        self.code = code
-
-
-def die(message, code=2):
-    raise Failure(message, code)
-
-
-def shown(path):
-    return path.replace("\\", "/")
-
-
-def version_key(text):
-    """Sort "10.0" above "9.0", which a plain string sort gets backwards."""
-    parts = [int(chunk) for chunk in re.split(r"[^0-9]+", text) if chunk]
-    return parts or [0]
-
-
-def find_kicad_cli():
-    """The CLI ships with KiCad and is usually not on PATH. Prefer the newest install."""
-    override = os.environ.get("KICAD_CLI")
-    if override:
-        return override
-    on_path = shutil.which("kicad-cli")
-    if on_path:
-        return on_path
-    found = []
-    for base in (os.environ.get("ProgramFiles", r"C:\Program Files"),
-            os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")):
-        root = os.path.join(base, "KiCad")
-        if not os.path.isdir(root):
-            continue
-        for entry in sorted(os.listdir(root)):
-            candidate = os.path.join(root, entry, "bin", "kicad-cli.exe")
-            if os.path.isfile(candidate):
-                found.append((version_key(entry), candidate))
-    found.sort()
-    return found[-1][1] if found else None
 
 
 KICAD_CLI = None
@@ -1081,11 +1038,11 @@ def do_publish(project):
         die("gh is not on PATH - install the GitHub CLI to publish")
     root = os.path.join(project.root, "release")
     if not os.path.isdir(root):
-        die("nothing built yet - run ki-release first")
+        die("nothing built yet - run ki release first")
     builds = [d for d in sorted(os.listdir(root))
         if os.path.isfile(os.path.join(root, d, "build.json"))]
     if not builds:
-        die("no complete build in %s - run ki-release, not --png or --render" % shown(root))
+        die("no complete build in %s - run ki release, not --png or --render" % shown(root))
     tag = builds[-1]
     outdir = os.path.join(root, tag)
     record = json.load(open(os.path.join(outdir, "build.json"), encoding="utf-8"))
@@ -1144,9 +1101,9 @@ def do_publish(project):
 
 def main():
     global KICAD_CLI
-    parser = argparse.ArgumentParser(prog="ki-release", description=DESCRIPTION,
+    parser = argparse.ArgumentParser(prog="ki release", description=DESCRIPTION,
         epilog=EPILOG,
-        formatter_class=lambda prog: argparse.RawDescriptionHelpFormatter(prog, width=99))
+        formatter_class=help_formatter)
     parser.add_argument("directory", nargs="?", default=".", metavar="DIR",
         help="the project directory, the current one by default")
     mode = parser.add_mutually_exclusive_group()
@@ -1205,14 +1162,10 @@ def main():
         return 0
 
     made, outdir = do_build(project, tag, "all")
-    print("\n%d files. Nothing published - review them, then run ki-release --publish."
+    print("\n%d files. Nothing published - review them, then run ki release --publish."
         % len(made))
     return 0
 
 
 if __name__ == "__main__":
-    try:
-        sys.exit(main())
-    except Failure as failure:
-        sys.stderr.write("[release] %s\n" % failure)
-        sys.exit(failure.code)
+    exit_with(main)

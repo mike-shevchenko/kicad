@@ -1,22 +1,21 @@
 #!/usr/bin/env python3
 """Change a text or field justification without moving what you see on the board."""
 # Written with the help of Claude Opus 5.
-# Wrappers on PATH: ki-justify.cmd for cmd.exe, ki-justify for cygwin and git-bash.
-# Create them with ki_install.py.
+# Run as "ki justify" through the ki launcher, or directly as "python ki_justify.py".
 
 import argparse
-import glob
 import os
 import re
-import subprocess
-import sys
+
+from ki_lib import (default_board, die, ensure_kicad_python, exit_with, form_end,
+    help_formatter, shown)
 
 DESCRIPTION = "Rejustify a text or field, shifting it so its position on the board is kept."
 
 EPILOG = """\
 Usage
 
-  ki-justify TEXT JUSTIFY JUSTIFY [FILE]
+  ki justify TEXT JUSTIFY JUSTIFY [FILE]
 
   TEXT     the exact contents of the text or field, matched whole, never as a substring
   JUSTIFY  the wanted justification, one word per axis
@@ -26,10 +25,10 @@ Usage
   top, center or bottom vertically. Only left/right and top/bottom name an axis, so "center"
   takes whichever axis the other word leaves free. Order carries no meaning:
 
-      ki-justify J2 center left       left, vertically centered
-      ki-justify J2 left center       the same
-      ki-justify J2 bottom left       left and bottom
-      ki-justify J2 center center     centered both ways
+      ki justify J2 center left       left, vertically centered
+      ki justify J2 left center       the same
+      ki justify J2 bottom left       left and bottom
+      ki justify J2 center center     centered both ways
 
   Two words for the same axis are refused. A justification of center on both axes with no
   mirroring is what KiCad expresses by leaving the form out, so this writes it out the same
@@ -66,7 +65,6 @@ When more than one matches
 
 HORIZONTAL = ("left", "center", "right")
 VERTICAL = ("top", "center", "bottom")
-RELAUNCH_FLAG = "KI_JUSTIFY_UNDER_KICAD_PYTHON"
 SNAP_MM = 0.01  # grid the new anchor is rounded to
 
 # The three shapes a piece of text takes in these files. The captured group is the content.
@@ -77,66 +75,6 @@ HOLDERS = (re.compile(r'\(gr_text\s+"((?:[^"\\]|\\.)*)"'),
 AT = re.compile(r'\(at\s+(-?[\d.]+)\s+(-?[\d.]+)((?:\s+-?[\d.]+)?)\s*\)')
 JUSTIFY = re.compile(r'\(justify([^)]*)\)')
 EFFECTS = re.compile(r'\(effects\b')
-
-
-def die(message, code=2):
-    sys.stderr.write("[justify] " + message + "\n")
-    sys.exit(code)
-
-
-def shown(path):
-    return path.replace("\\", "/")
-
-
-def version_key(text):
-    """Sort "10.0" above "9.0", which a plain string sort gets backwards."""
-    parts = [int(chunk) for chunk in re.split(r"[^0-9]+", text) if chunk]
-    return parts or [0]
-
-
-def find_kicad_python():
-    """KiCad's bundled interpreter is the only one carrying pcbnew. Prefer the newest."""
-    override = os.environ.get("KICAD_PYTHON")
-    if override:
-        return override if os.path.isfile(override) else None
-    roots = [os.path.join(os.environ.get("ProgramFiles", r"C:\Program Files"), "KiCad"),
-        os.path.join(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"), "KiCad")]
-    found = []
-    for root in roots:
-        if not os.path.isdir(root):
-            continue
-        for entry in sorted(os.listdir(root)):
-            candidate = os.path.join(root, entry, "bin", "python.exe")
-            if os.path.isfile(candidate):
-                found.append((version_key(entry), candidate))
-    found.sort()
-    return found[-1][1] if found else None
-
-
-def ensure_kicad_python():
-    """Re-run under KiCad's Python when pcbnew is missing, so any python on PATH will do."""
-    try:
-        import pcbnew  # noqa: F401
-        return
-    except ImportError:
-        pass
-    if os.environ.get(RELAUNCH_FLAG):
-        die("pcbnew is still not importable under %s, KiCad's own Python." % sys.executable)
-    target = find_kicad_python()
-    if not target:
-        die("no KiCad Python found; set KICAD_PYTHON to its python.exe")
-    # subprocess, not execv: on Windows exec detaches and loses the exit status.
-    sys.exit(subprocess.call([target, os.path.realpath(__file__)] + sys.argv[1:],
-        env=dict(os.environ, **{RELAUNCH_FLAG: "1"})))
-
-
-def default_board():
-    hits = sorted(glob.glob("*.kicad_pcb"))
-    if len(hits) == 1:
-        return hits[0]
-    if not hits:
-        die("no .kicad_pcb here; name one, or run inside the project directory")
-    die("several .kicad_pcb here (%s); name the one you mean" % ", ".join(hits))
 
 
 def target_pair(words):
@@ -159,29 +97,6 @@ def target_pair(words):
         die("%s are both vertical; give one per axis" % " and ".join(map(repr, vertical)))
     return (horizontal[0] if horizontal else "center",
         vertical[0] if vertical else "center")
-
-
-def form_end(text, start):
-    """Index just past the closing paren of the form starting at `start`."""
-    depth, i, in_string = 0, start, False
-    while i < len(text):
-        c = text[i]
-        if in_string:
-            if c == "\\":
-                i += 2
-                continue
-            if c == '"':
-                in_string = False
-        elif c == '"':
-            in_string = True
-        elif c == "(":
-            depth += 1
-        elif c == ")":
-            depth -= 1
-            if depth == 0:
-                return i + 1
-        i += 1
-    die("unbalanced parentheses near offset %d" % start)
 
 
 def find_holders(text, wanted):
@@ -337,8 +252,8 @@ def drop_line(body, start, end):
 
 def main():
     parser = argparse.ArgumentParser(
-        prog="ki-justify", description=DESCRIPTION, epilog=EPILOG,
-        formatter_class=lambda prog: argparse.RawDescriptionHelpFormatter(prog, width=99))
+        prog="ki justify", description=DESCRIPTION, epilog=EPILOG,
+        formatter_class=help_formatter)
     parser.add_argument("text", metavar="TEXT", help="exact contents of the text or field")
     parser.add_argument("justify", nargs=2, metavar="JUSTIFY",
         help="the wanted justification, one word per axis, in either order")
@@ -366,7 +281,7 @@ def main():
             print("  " + describe(text, span))
         return 1
 
-    ensure_kicad_python()
+    ensure_kicad_python(__file__)
     anchor, was, shift = measure(path, args.text, horizontal, vertical)
     if (horizontal, vertical) == was:
         print("%r is already justified %s %s; nothing changed" % (args.text, was[0], was[1]))
@@ -386,4 +301,4 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    exit_with(main)
