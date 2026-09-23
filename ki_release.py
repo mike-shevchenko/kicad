@@ -126,7 +126,14 @@ COLORS = {"Edge.Cuts": ("#D0D2CD", 1.0),
     "F.Fab": ("#AFAFAF", 1.0),
     "B.Fab": ("#585D84", 1.0),
     "F.Courtyard": ("#FF26E2", 1.0),
-    "B.Courtyard": ("#26E9FF", 1.0)}
+    "B.Courtyard": ("#26E9FF", 1.0),
+    "F.Adhesive": ("#840084", 1.0),
+    "B.Adhesive": ("#000084", 1.0),
+    "User.Drawings": ("#C2C2C2", 1.0),
+    "User.Comments": ("#5994DC", 1.0),
+    "User.Eco1": ("#B4DBD2", 1.0),
+    "User.Eco2": ("#D8C852", 1.0),
+    "Margin": ("#FF26E2", 1.0)}
 
 # Bottom to top, as the editor draws it with a copper layer selected: silkscreen underneath,
 # copper over it and semi-transparent, so a ground pour does not hide the labels it covers.
@@ -146,6 +153,11 @@ PAGE = "white"
 LABEL_COLOR = "#303030"
 LABEL_DIVISOR = 24  # the page width over this gives the label point size, and its margin
 
+# An empty layer still gets a page when the other side of the board has one, so that a
+# two-page view keeps showing a front and its back together rather than drifting apart.
+BLANK_WORD = "BLANK"
+BLANK_COLOR = "#A0A0A0"
+
 # The Fab layers are drawings rather than artwork, so their pages carry no substrate, only
 # the board outline for context. KiCad's own colors are chosen for a dark canvas and vanish
 # on a white one, so these two pages are drawn in ink instead.
@@ -159,9 +171,10 @@ CUT_LAYER = "Edge.Cuts"
 CUT_INK = "#FF2020"
 CUT_FADE = 0.35
 
-# Every layer worth a page in the layer plot, in reading order.
-PLOT_LAYERS = ("F.Cu", "B.Cu", "F.Silkscreen", "B.Silkscreen", "F.Mask", "B.Mask",
-    "F.Paste", "B.Paste", "F.Fab", "B.Fab", "F.Courtyard", "B.Courtyard", "Edge.Cuts")
+# One line of the board's own (layers ...) block: the id, the name the file stores, the
+# kind, and optionally a second name. KiCad renamed several layers and keeps the old name
+# as the stored one, so "F.SilkS" arrives carrying "F.Silkscreen" alongside it.
+LAYER_LINE = re.compile(r'\(\s*\d+\s+"([^"]+)"\s+\w+(?:\s+"([^"]+)")?\s*\)')
 
 RENDER_TILT_SIZE = (1600, 1200)
 RENDER_FLAT_LONG_SIDE = 1600
@@ -304,6 +317,25 @@ class Project(object):
 
     def asset(self, tag, suffix):
         return "%s-%s-%s" % (self.name, tag, suffix)
+
+
+def board_layers(pcb):
+    """Every layer the board enables, in the order it writes them, as (stored, shown).
+
+    That order is KiCad's own, so the document follows the Board Setup list without this
+    script having to hold an opinion about which layers exist or how they rank.
+    """
+    text = open(pcb, encoding="utf-8", errors="replace").read()
+    block = re.search(r"\n\t\(layers\n(.*?)\n\t\)\n", text, re.S)
+    if not block:
+        die("no (layers ...) block in %s" % shown(pcb))
+    found = []
+    for line in LAYER_LINE.finditer(block.group(1)):
+        stored, shown_as = line.group(1), line.group(2)
+        found.append((stored, shown_as or stored))
+    if not found:
+        die("the (layers ...) block of %s lists nothing" % shown(pcb))
+    return found
 
 
 def frozen_revisions(root):
@@ -617,20 +649,45 @@ def page_ink(layer):
     return COLORS.get(layer, (LABEL_COLOR, 1.0))[0]
 
 
-def layer_page(pcb, layer, under, out_png, scale, mirror, work):
-    """One page: the board body, the layer over it in its own color, and the layer name."""
-    pdf = os.path.join(work, "page-%s.pdf" % layer)
-    plot_layer(pcb, layer, pdf, scale, mirror)
+def write_at(page, text, top, size, color):
+    """One line, horizontally centered, with its top edge at the given height."""
+    font = label_font(size)
+    draw = ImageDraw.Draw(page)
+    box = draw.textbbox((0, 0), text, font=font)
+    draw.text(((page.width - box[2] + box[0]) // 2, top), text, font=font, fill=color)
+
+
+def blank_page(name, size, out_png):
+    """A placeholder page, carrying the layer name and nothing that was drawn on it."""
+    page = Image.new("RGB", size, PAGE)
+    step = max(12, page.width // LABEL_DIVISOR)
+    write_at(page, name, step, step, LABEL_COLOR)
+    write_at(page, BLANK_WORD, (page.height - step) // 2, step, BLANK_COLOR)
+    page.save(out_png)
+
+
+def counterpart(name):
+    """The same layer on the other side of the board, or None for one that has no side."""
+    if name.startswith("F."):
+        return "B." + name[2:]
+    if name.startswith("B."):
+        return "F." + name[2:]
+    return None
+
+
+def layer_page(stored, name, under, out_png, work):
+    """One page: the board body, the layer over it in its own color, and the layer name.
+
+    The layer is plotted under the name the file stores and captioned under the one it
+    shows, which for a renamed layer are not the same string.
+    """
+    mask = artwork(os.path.join(work, "plot-%s.pdf" % stored), DPI)
     page = Image.new("RGBA", under.size, PAGE)
     page = Image.alpha_composite(page, under)
-    page = Image.alpha_composite(page, tint(pdf, page_ink(layer), 1.0, DPI))
+    page = Image.alpha_composite(page, solid(mask, page_ink(name)))
 
     step = max(12, page.width // LABEL_DIVISOR)
-    font = label_font(step)
-    draw = ImageDraw.Draw(page)
-    box = draw.textbbox((0, 0), layer, font=font)
-    draw.text(((page.width - box[2] + box[0]) // 2, step), layer, font=font,
-        fill=LABEL_COLOR)
+    write_at(page, name, step, step, LABEL_COLOR)
     page.convert("RGB").save(out_png)
 
 
@@ -687,18 +744,47 @@ def build_layers_pdf(project, outdir, tag, work, scale):
     outlines = {False: outline(project.pcb, work, scale, False, "front"),
         True: outline(project.pcb, work, scale, True, "back")}
     fades = {False: faded(bodies[False]), True: faded(bodies[True])}
-    pages = []
-    for layer in PLOT_LAYERS:
-        mirror = layer.startswith("B.")
-        if layer in OUTLINE_ONLY:
+    # Plotted first and judged before any page is built, because whether an empty layer
+    # deserves a placeholder depends on a layer that may come later.
+    layers = board_layers(project.pcb)
+    # Pages of a pair face each other in a two-page view only while nothing single-sided
+    # comes between them, so Edge.Cuts, Margin and the User layers collect at the back. A
+    # layer counts as sided when the board also declares its other half, which needs no
+    # list of names - the F. and B. prefixes say it.
+    present = set(name for _stored, name in layers)
+    layers = ([item for item in layers if counterpart(item[1]) in present]
+        + [item for item in layers if counterpart(item[1]) not in present])
+    bare = {}
+    for stored, name in layers:
+        plot_layer(project.pcb, stored, os.path.join(work, "plot-%s.pdf" % stored), scale,
+            name.startswith("B."))
+        bare[name] = not artwork(os.path.join(work, "plot-%s.pdf" % stored), DPI).getbbox()
+
+    pages, dropped, placed = [], [], []
+    for stored, name in layers:
+        mirror = name.startswith("B.")
+        page = os.path.join(work, "%02d-%s.png" % (len(pages), stored))
+        if bare[name]:
+            if bare.get(counterpart(name), True):
+                dropped.append(name)
+                continue
+            placed.append(name)
+            blank_page(name, bodies[mirror].size, page)
+            pages.append(page)
+            continue
+        if name in OUTLINE_ONLY:
             under = outlines[mirror]
-        elif layer == CUT_LAYER:
+        elif name == CUT_LAYER:
             under = fades[mirror]
         else:
             under = bodies[mirror]
-        page = os.path.join(work, "%02d-%s.png" % (len(pages), layer))
-        layer_page(project.pcb, layer, under, page, scale, mirror, work)
+        layer_page(stored, name, under, page, work)
         pages.append(page)
+    if dropped:
+        print("  nothing on %s, so no page for %s"
+            % (", ".join(dropped), "them" if len(dropped) > 1 else "it"))
+    if placed:
+        print("  nothing on %s, kept blank to face the other side" % ", ".join(placed))
     out = os.path.join(outdir, project.asset(tag, "layers.pdf"))
     write_pdf(pages, out, DPI)
     return out
