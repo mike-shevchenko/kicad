@@ -436,17 +436,59 @@ def sharp(mask):
     return mask.point(lambda value: 255 if value > 32 else 0)
 
 
-def plot_layer(pcb, layer, out_pdf, scale, mirror, drill=None):
-    """One layer, black on white, scaled up to fill the sheet."""
-    if drill is None:
-        drill = 2 if layer in COPPER else 0
-    command = [KICAD_CLI, "pcb", "export", "pdf", "--mode-single", "--layers", layer,
-        "--black-and-white", "--scale", "%.4f" % scale,
-        "--drill-shape-opt", str(drill)]
-    if mirror:
-        command.append("--mirror")
-    command += ["-o", out_pdf, pcb]
-    run(command)
+def default_drill(name):
+    """Copper plots carry the actual drill shapes so the holes read; the rest stay clean."""
+    return 2 if name in COPPER else 0
+
+
+class Plotter:
+    """Layer plots of one board at one scale, black on white, in as few runs as possible.
+
+    A kicad-cli run costs about half a second to load the board and a few milliseconds
+    per layer, so all plots sharing a mirror and drill setting come out of one run. A
+    plot is requested as (name, mirror, drill), with the name as the board shows it.
+    """
+
+    def __init__(self, pcb, work, scale):
+        self.pcb, self.work, self.scale = pcb, work, scale
+        self.layers = board_layers(pcb)
+        self.stored = dict((name, stored) for stored, name in self.layers)
+        self.stem = os.path.splitext(os.path.basename(pcb))[0]
+        self.made = {}
+
+    def plot(self, wanted):
+        """Make every requested plot not made yet."""
+        groups = {}
+        for name, mirror, drill in wanted:
+            if (name, mirror, drill) not in self.made:
+                groups.setdefault((mirror, drill), []).append(name)
+        for (mirror, drill), names in sorted(groups.items()):
+            self.batch(names, mirror, drill)
+
+    def one(self, name, mirror, drill):
+        """The PDF of one plot, made now if it was not requested before."""
+        self.plot([(name, mirror, drill)])
+        return self.made[name, mirror, drill]
+
+    def batch(self, names, mirror, drill):
+        for name in names:
+            if name not in self.stored:
+                die("%s is not a layer of %s" % (name, shown(self.pcb)))
+        directory = os.path.join(self.work,
+            "plots-%s-%d" % ("back" if mirror else "front", drill))
+        os.makedirs(directory, exist_ok=True)
+        command = [KICAD_CLI, "pcb", "export", "pdf", "--mode-separate",
+            "--layers", ",".join(self.stored[name] for name in names),
+            "--black-and-white", "--scale", "%.4f" % self.scale,
+            "--drill-shape-opt", str(drill)]
+        if mirror:
+            command.append("--mirror")
+        run(command + ["-o", directory, self.pcb])
+        for name in names:
+            pdf = os.path.join(directory, "%s-%s.pdf" % (self.stem, name.replace(".", "_")))
+            if not os.path.exists(pdf):
+                die("kicad-cli did not write %s" % shown(pdf))
+            self.made[name, mirror, drill] = pdf
 
 
 def tint(pdf, color, alpha, density):
@@ -481,8 +523,7 @@ def board_scale(pcb, work):
     Working in pixels of a throwaway plot avoids parsing the sheet size and avoids pcbnew:
     only the ratio matters, so the probe density cancels out.
     """
-    probe = os.path.join(work, "probe.pdf")
-    plot_layer(pcb, "Edge.Cuts", probe, 1.0, False)
+    probe = Plotter(pcb, os.path.join(work, "probe"), 1.0).one("Edge.Cuts", False, 0)
     mask = sharp(artwork(probe, PROBE_DPI))
     page_w, page_h = mask.size
     box = mask.getbbox()
@@ -493,15 +534,19 @@ def board_scale(pcb, work):
     return scale, float(board_w) / board_h
 
 
-def side_image(pcb, stack, mirror, scale, work, prefix):
+def side_plots(stack, mirror):
+    """The plots one side of the board image is made of."""
+    return [(name, mirror, default_drill(name)) for name in stack]
+
+
+def side_image(plotter, stack, mirror):
     """One side of the board composited and cropped to its outline."""
+    plotter.plot(side_plots(stack, mirror))
     drawn, edge = [], None
-    for layer in stack:
-        pdf = os.path.join(work, "%s-%s.pdf" % (prefix, layer))
-        plot_layer(pcb, layer, pdf, scale, mirror)
-        color, alpha = COLORS[layer]
-        drawn.append(tint(pdf, color, alpha, DPI))
-        if layer == "Edge.Cuts":
+    for name in stack:
+        color, alpha = COLORS[name]
+        drawn.append(tint(plotter.one(name, mirror, default_drill(name)), color, alpha, DPI))
+        if name == "Edge.Cuts":
             edge = drawn[-1]
 
     page = Image.new("RGBA", drawn[0].size, BACKGROUND)
@@ -514,11 +559,10 @@ def side_image(pcb, stack, mirror, scale, work, prefix):
         min(page.width, box[2] + margin), min(page.height, box[3] + margin))).convert("RGB")
 
 
-def build_board_image(project, outdir, tag, work):
+def build_board_image(project, outdir, tag, plotter):
     """The deliverable image: front on the left, back mirrored on the right."""
-    scale, _aspect = board_scale(project.pcb, work)
-    front = side_image(project.pcb, FRONT_STACK, False, scale, work, "f")
-    back = side_image(project.pcb, BACK_STACK, True, scale, work, "b")
+    front = side_image(plotter, FRONT_STACK, False)
+    back = side_image(plotter, BACK_STACK, True)
 
     gutter = int(round(front.width * GUTTER))
     canvas = Image.new("RGB", (front.width + gutter + back.width,
@@ -527,7 +571,7 @@ def build_board_image(project, outdir, tag, work):
     canvas.paste(back, (front.width + gutter, 0))
     out = os.path.join(outdir, project.asset(tag, "board.png"))
     canvas.save(out)
-    return out, scale
+    return out
 
 
 def render(pcb, out_png, side, tilted, aspect):
@@ -558,8 +602,7 @@ def render(pcb, out_png, side, tilted, aspect):
     run(command)
 
 
-def build_renders(project, outdir, tag, work):
-    _scale, aspect = board_scale(project.pcb, work)
+def build_renders(project, outdir, tag, aspect):
     made = []
     for side in ("top", "bottom"):
         for tilted in (False, True):
@@ -582,7 +625,7 @@ def build_gerbers(project, outdir, tag, work):
     return out, digest
 
 
-def build_documents(project, outdir, tag, work, scale):
+def build_documents(project, outdir, tag, plotter):
     """Schematic, layer plots, model and the two machine-readable lists."""
     made = []
     if project.sch:
@@ -593,7 +636,7 @@ def build_documents(project, outdir, tag, work, scale):
         run([KICAD_CLI, "sch", "export", "bom", "-o", out, project.sch])
         made.append(out)
 
-    made.append(build_layers_pdf(project, outdir, tag, work, scale))
+    made.append(build_layers_pdf(project, outdir, tag, plotter))
 
     out = os.path.join(outdir, project.asset(tag, "model.step"))
     run([KICAD_CLI, "pcb", "export", "step", "--no-dnp", "-o", out, project.pcb])
@@ -606,22 +649,18 @@ def build_documents(project, outdir, tag, work, scale):
     return made
 
 
-def substrate(pcb, work, scale, mirror, name):
+def substrate(plotter, mirror):
     """The board body as an image: opaque where the substrate is, holes already punched.
 
     An outline plot that also carries the drill shapes encloses exactly two kinds of
     region, the body and the holes, so the body falls out of it on its own.
     """
-    pdf = os.path.join(work, name + ".pdf")
-    plot_layer(pcb, "Edge.Cuts", pdf, scale, mirror, drill=2)
-    return solid(enclosed(render_plot(pdf, DPI)), SUBSTRATE)
+    return solid(enclosed(render_plot(plotter.one(CUT_LAYER, mirror, 2), DPI)), SUBSTRATE)
 
 
-def outline(pcb, work, scale, mirror, name):
+def outline(plotter, mirror):
     """The board outline alone, for the pages that carry no substrate under them."""
-    pdf = os.path.join(work, name + "-outline.pdf")
-    plot_layer(pcb, "Edge.Cuts", pdf, scale, mirror, drill=0)
-    return tint(pdf, OUTLINE_INK, 1.0, DPI)
+    return tint(plotter.one(CUT_LAYER, mirror, 0), OUTLINE_INK, 1.0, DPI)
 
 
 def faded(body):
@@ -675,13 +714,8 @@ def counterpart(name):
     return None
 
 
-def layer_page(stored, name, under, out_png, work):
-    """One page: the board body, the layer over it in its own color, and the layer name.
-
-    The layer is plotted under the name the file stores and captioned under the one it
-    shows, which for a renamed layer are not the same string.
-    """
-    mask = artwork(os.path.join(work, "plot-%s.pdf" % stored), DPI)
+def layer_page(name, mask, under, out_png):
+    """One page: the board body, the layer over it in its own color, and the layer name."""
     page = Image.new("RGBA", under.size, PAGE)
     page = Image.alpha_composite(page, under)
     page = Image.alpha_composite(page, solid(mask, page_ink(name)))
@@ -737,33 +771,41 @@ def write_pdf(pages, out, density):
         handle.write(body)
 
 
-def build_layers_pdf(project, outdir, tag, work, scale):
+def document_plots(plotter):
+    """Every plot the layer document is made of: the two board bodies, the two outlines
+    and each layer the board declares, back layers mirrored."""
+    wanted = [(CUT_LAYER, mirror, drill) for mirror in (False, True) for drill in (2, 0)]
+    for _stored, name in plotter.layers:
+        wanted.append((name, name.startswith("B."), default_drill(name)))
+    return wanted
+
+
+def build_layers_pdf(project, outdir, tag, plotter):
     """One page per layer, back layers mirrored as if seen through the board."""
-    bodies = {False: substrate(project.pcb, work, scale, False, "front"),
-        True: substrate(project.pcb, work, scale, True, "back")}
-    outlines = {False: outline(project.pcb, work, scale, False, "front"),
-        True: outline(project.pcb, work, scale, True, "back")}
+    plotter.plot(document_plots(plotter))
+    bodies = {False: substrate(plotter, False), True: substrate(plotter, True)}
+    outlines = {False: outline(plotter, False), True: outline(plotter, True)}
     fades = {False: faded(bodies[False]), True: faded(bodies[True])}
-    # Plotted first and judged before any page is built, because whether an empty layer
-    # deserves a placeholder depends on a layer that may come later.
-    layers = board_layers(project.pcb)
     # Pages of a pair face each other in a two-page view only while nothing single-sided
     # comes between them, so Edge.Cuts, Margin and the User layers collect at the back. A
     # layer counts as sided when the board also declares its other half, which needs no
     # list of names - the F. and B. prefixes say it.
-    present = set(name for _stored, name in layers)
-    layers = ([item for item in layers if counterpart(item[1]) in present]
-        + [item for item in layers if counterpart(item[1]) not in present])
-    bare = {}
-    for stored, name in layers:
-        plot_layer(project.pcb, stored, os.path.join(work, "plot-%s.pdf" % stored), scale,
-            name.startswith("B."))
-        bare[name] = not artwork(os.path.join(work, "plot-%s.pdf" % stored), DPI).getbbox()
+    names = [name for _stored, name in plotter.layers]
+    present = set(names)
+    layers = ([name for name in names if counterpart(name) in present]
+        + [name for name in names if counterpart(name) not in present])
+    # Rasterized and judged before any page is built, because whether an empty layer
+    # deserves a placeholder depends on a layer that may come later.
+    masks, bare = {}, {}
+    for name in layers:
+        mirror = name.startswith("B.")
+        masks[name] = artwork(plotter.one(name, mirror, default_drill(name)), DPI)
+        bare[name] = not masks[name].getbbox()
 
     pages, dropped, placed = [], [], []
-    for stored, name in layers:
+    for name in layers:
         mirror = name.startswith("B.")
-        page = os.path.join(work, "%02d-%s.png" % (len(pages), stored))
+        page = os.path.join(plotter.work, "%02d-%s.png" % (len(pages), name))
         if bare[name]:
             if bare.get(counterpart(name), True):
                 dropped.append(name)
@@ -778,7 +820,7 @@ def build_layers_pdf(project, outdir, tag, work, scale):
             under = fades[mirror]
         else:
             under = bodies[mirror]
-        layer_page(stored, name, under, page, work)
+        layer_page(name, masks[name], under, page)
         pages.append(page)
     if dropped:
         print("  nothing on %s, so no page for %s"
@@ -956,17 +998,20 @@ def do_build(project, tag, what):
     work = tempfile.mkdtemp(prefix="ki-release-")
     try:
         print("\nBuilding %s" % shown(outdir))
+        scale, aspect = board_scale(project.pcb, work)
+        plotter = Plotter(project.pcb, work, scale)
         if what == "png":
-            made, _scale = build_board_image(project, outdir, tag, work)
-            made = [made]
+            made = [build_board_image(project, outdir, tag, plotter)]
         elif what == "render":
-            made = build_renders(project, outdir, tag, work)
+            made = build_renders(project, outdir, tag, aspect)
         else:
+            # Everything the image and the document will ask for, plotted in one go.
+            plotter.plot(side_plots(FRONT_STACK, False) + side_plots(BACK_STACK, True)
+                + document_plots(plotter))
             zipped, digest = build_gerbers(project, outdir, tag, work)
-            image, scale = build_board_image(project, outdir, tag, work)
-            made = [zipped, image]
-            made += build_renders(project, outdir, tag, work)
-            made += build_documents(project, outdir, tag, work, scale)
+            made = [zipped, build_board_image(project, outdir, tag, plotter)]
+            made += build_renders(project, outdir, tag, aspect)
+            made += build_documents(project, outdir, tag, plotter)
             path, _record = write_build_json(project, outdir, tag, digest, scale, made)
             made.append(path)
         for path in sorted(made):
