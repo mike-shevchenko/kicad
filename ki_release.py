@@ -15,7 +15,19 @@ import subprocess
 import sys
 import tempfile
 import zipfile
+import zlib
 from datetime import datetime, timezone
+
+# The imaging is pure Python. pypdfium2 ships its renderer inside the wheel, so nothing has
+# to be installed outside pip. scipy is optional and only makes one step quicker.
+try:
+    import numpy
+    import pypdfium2
+    from PIL import Image, ImageDraw, ImageFont, ImageOps
+except ImportError as problem:
+    IMAGING_PROBLEM = problem
+else:
+    IMAGING_PROBLEM = None
 
 DESCRIPTION = "Build a KiCad board's release artifacts, and publish them as a GitHub draft."
 
@@ -82,8 +94,13 @@ Versions
 
 Requirements
 
-  kicad-cli from the KiCad installation, ImageMagick's magick on PATH, and gh for
-  publishing. Set KICAD_CLI or MAGICK to override the ones found automatically.
+  kicad-cli from the KiCad installation, and gh for publishing. Set KICAD_CLI to override
+  the one found automatically. Everything else is Python:
+
+      python -m pip install --user pypdfium2 pillow numpy
+
+  Use python -m pip rather than a bare pip, which may belong to a different interpreter.
+  scipy is not required, but one step runs far quicker when it is there.
 """
 
 # Rasterization is fixed at 400 dpi, and the board is scaled to fill the drawing sheet, so
@@ -207,15 +224,7 @@ def find_kicad_cli():
     return found[-1][1] if found else None
 
 
-def find_magick():
-    override = os.environ.get("MAGICK")
-    if override:
-        return override
-    return shutil.which("magick")
-
-
 KICAD_CLI = None
-MAGICK = None
 
 
 def run(command, quiet=True):
@@ -369,8 +378,30 @@ def fab_hash_of_tag(project, tag):
         shutil.rmtree(work, ignore_errors=True)
 
 
-def identify(path, fmt):
-    return run([MAGICK, "identify", "-format", fmt, path]).strip()
+def render_plot(pdf, density):
+    """One plot as a grayscale page: black artwork on white paper."""
+    document = pypdfium2.PdfDocument(pdf)
+    try:
+        return document[0].render(scale=density / 72.0).to_pil().convert("L")
+    finally:
+        document.close()
+
+
+def artwork(pdf, density):
+    """A plot as an alpha mask: opaque where the layer drew, clear on blank paper."""
+    return ImageOps.invert(render_plot(pdf, density))
+
+
+def solid(mask, color):
+    """One flat color wearing that mask as its alpha."""
+    layer = Image.new("RGBA", mask.size, color)
+    layer.putalpha(mask)
+    return layer
+
+
+def sharp(mask):
+    """A mask with the antialiased fringe pushed to one side or the other."""
+    return mask.point(lambda value: 255 if value > 32 else 0)
 
 
 def plot_layer(pcb, layer, out_pdf, scale, mirror, drill=None):
@@ -386,13 +417,30 @@ def plot_layer(pcb, layer, out_pdf, scale, mirror, drill=None):
     run(command)
 
 
-def tint(pdf, png, color, alpha, density):
-    """Rasterize a black-on-white plot into artwork of one color on transparency."""
-    run([MAGICK, "-density", str(density), pdf, "-colorspace", "gray", "-negate",
-        "-alpha", "off",
-        "(", "+clone", "-fill", color, "-colorize", "100", ")", "+swap",
-        "-compose", "CopyOpacity", "-composite",
-        "-channel", "A", "-evaluate", "multiply", "%.3f" % alpha, "+channel", png])
+def tint(pdf, color, alpha, density):
+    """A plot rasterized into artwork of one color on transparency."""
+    mask = artwork(pdf, density)
+    if alpha < 1.0:
+        mask = mask.point(lambda value: int(value * alpha))
+    return solid(mask, color)
+
+
+def enclosed(page):
+    """Mask of what a page's ink encloses, dropping the outside and the ink itself.
+
+    Labelling the white regions and discarding the one touching a corner is the same idea
+    as flooding that corner, but Pillow's flood fill is a Python loop and costs seconds.
+    """
+    white = numpy.asarray(page) > 127
+    try:
+        from scipy import ndimage
+    except ImportError:
+        flat = page.point(lambda value: 255 if value > 127 else 0)
+        ImageDraw.floodfill(flat, (0, 0), 0)
+        return flat
+    labels, _count = ndimage.label(white)
+    body = white & (labels != labels[0, 0])
+    return Image.fromarray((body * 255).astype("uint8"), "L")
 
 
 def board_scale(pcb, work):
@@ -403,62 +451,50 @@ def board_scale(pcb, work):
     """
     probe = os.path.join(work, "probe.pdf")
     plot_layer(pcb, "Edge.Cuts", probe, 1.0, False)
-    raster = os.path.join(work, "probe.png")
-    run([MAGICK, "-density", str(PROBE_DPI), probe, "-colorspace", "gray", "-alpha", "off",
-        raster])
-    page = identify(raster, "%w %h").split()
-    box = identify(raster, "%@").replace("+", " ").replace("x", " ").split()
-    page_w, page_h = int(page[0]), int(page[1])
-    board_w, board_h = int(box[0]), int(box[1])
-    if not board_w or not board_h:
+    mask = sharp(artwork(probe, PROBE_DPI))
+    page_w, page_h = mask.size
+    box = mask.getbbox()
+    if not box:
         die("the board outline is empty - is there anything on Edge.Cuts?")
+    board_w, board_h = box[2] - box[0], box[3] - box[1]
     scale = min(page_w * PAGE_FILL / board_w, page_h * PAGE_FILL / board_h)
     return scale, float(board_w) / board_h
 
 
-def side_image(pcb, stack, mirror, out_png, scale, work, prefix):
-    """Composite one side of the board, cropped to its outline."""
-    layers = []
+def side_image(pcb, stack, mirror, scale, work, prefix):
+    """One side of the board composited and cropped to its outline."""
+    drawn, edge = [], None
     for layer in stack:
         pdf = os.path.join(work, "%s-%s.pdf" % (prefix, layer))
-        png = os.path.join(work, "%s-%s.png" % (prefix, layer))
         plot_layer(pcb, layer, pdf, scale, mirror)
         color, alpha = COLORS[layer]
-        tint(pdf, png, color, alpha, DPI)
-        layers.append((layer, png))
+        drawn.append(tint(pdf, color, alpha, DPI))
+        if layer == "Edge.Cuts":
+            edge = drawn[-1]
 
-    outline = dict(layers)["Edge.Cuts"]
-    page = identify(outline, "%w %h").split()
-    box = identify(outline, "%@").replace("+", " ").replace("x", " ").split()
-    page_w, page_h = int(page[0]), int(page[1])
-    width, height, left, top = (int(value) for value in box)
-    margin = int(round(width * CROP_MARGIN))
-    left = max(0, left - margin)
-    top = max(0, top - margin)
-    width = min(page_w - left, width + 2 * margin)
-    height = min(page_h - top, height + 2 * margin)
+    page = Image.new("RGBA", drawn[0].size, BACKGROUND)
+    for layer in drawn:
+        page = Image.alpha_composite(page, layer)
 
-    command = [MAGICK, "-size", "%dx%d" % (page_w, page_h), "xc:" + BACKGROUND]
-    for _layer, png in layers:
-        command += [png, "-compose", "over", "-composite"]
-    command += ["-crop", "%dx%d+%d+%d" % (width, height, left, top), "+repage", out_png]
-    run(command)
+    box = sharp(edge.getchannel("A")).getbbox()
+    margin = int(round((box[2] - box[0]) * CROP_MARGIN))
+    return page.crop((max(0, box[0] - margin), max(0, box[1] - margin),
+        min(page.width, box[2] + margin), min(page.height, box[3] + margin))).convert("RGB")
 
 
 def build_board_image(project, outdir, tag, work):
     """The deliverable image: front on the left, back mirrored on the right."""
     scale, _aspect = board_scale(project.pcb, work)
-    front = os.path.join(work, "front.png")
-    back = os.path.join(work, "back.png")
-    side_image(project.pcb, FRONT_STACK, False, front, scale, work, "f")
-    side_image(project.pcb, BACK_STACK, True, back, scale, work, "b")
+    front = side_image(project.pcb, FRONT_STACK, False, scale, work, "f")
+    back = side_image(project.pcb, BACK_STACK, True, scale, work, "b")
 
-    width = int(identify(front, "%w"))
-    gutter = int(round(width * GUTTER))
+    gutter = int(round(front.width * GUTTER))
+    canvas = Image.new("RGB", (front.width + gutter + back.width,
+        max(front.height, back.height)), BACKGROUND)
+    canvas.paste(front, (0, 0))
+    canvas.paste(back, (front.width + gutter, 0))
     out = os.path.join(outdir, project.asset(tag, "board.png"))
-    run([MAGICK, front,
-        "(", back, "-background", BACKGROUND, "-splice", "%dx0+0+0" % gutter, ")",
-        "-background", BACKGROUND, "+append", out])
+    canvas.save(out)
     return out, scale
 
 
@@ -541,36 +577,36 @@ def build_documents(project, outdir, tag, work, scale):
 def substrate(pcb, work, scale, mirror, name):
     """The board body as an image: opaque where the substrate is, holes already punched.
 
-    Flooding the page corner of an outline plot that also carries the drill shapes leaves
-    exactly the body standing, since nothing else encloses a region.
+    An outline plot that also carries the drill shapes encloses exactly two kinds of
+    region, the body and the holes, so the body falls out of it on its own.
     """
     pdf = os.path.join(work, name + ".pdf")
     plot_layer(pcb, "Edge.Cuts", pdf, scale, mirror, drill=2)
-    mask = os.path.join(work, name + "-mask.png")
-    run([MAGICK, "-density", str(DPI), pdf, "-colorspace", "gray", "-alpha", "off",
-        "-fuzz", "20%", "-fill", "black", "-draw", "color 0,0 floodfill",
-        "-alpha", "off", "-threshold", "50%", mask])
-    body = os.path.join(work, name + "-body.png")
-    run([MAGICK, "-size", identify(mask, "%wx%h"), "xc:" + SUBSTRATE, mask,
-        "-alpha", "off", "-compose", "CopyOpacity", "-composite", body])
-    return body
+    return solid(enclosed(render_plot(pdf, DPI)), SUBSTRATE)
 
 
 def outline(pcb, work, scale, mirror, name):
     """The board outline alone, for the pages that carry no substrate under them."""
     pdf = os.path.join(work, name + "-outline.pdf")
     plot_layer(pcb, "Edge.Cuts", pdf, scale, mirror, drill=0)
-    png = os.path.join(work, name + "-outline.png")
-    tint(pdf, png, OUTLINE_INK, 1.0, DPI)
-    return png
+    return tint(pdf, OUTLINE_INK, 1.0, DPI)
 
 
-def faded(body, work, name):
+def faded(body):
     """The board body at reduced opacity, for the page that draws the cut along its edge."""
-    out = os.path.join(work, name + "-faded.png")
-    run([MAGICK, body, "-channel", "A", "-evaluate", "multiply", "%.3f" % CUT_FADE,
-        "+channel", out])
-    return out
+    dim = body.copy()
+    dim.putalpha(body.getchannel("A").point(lambda value: int(value * CUT_FADE)))
+    return dim
+
+
+def label_font(size):
+    """A real face: Pillow's built-in font is a fixed bitmap, far too small for a page."""
+    for name in ("arial.ttf", "segoeui.ttf", "DejaVuSans.ttf", "LiberationSans-Regular.ttf"):
+        try:
+            return ImageFont.truetype(name, size)
+        except OSError:
+            continue
+    return ImageFont.load_default()
 
 
 def page_ink(layer):
@@ -581,20 +617,67 @@ def page_ink(layer):
     return COLORS.get(layer, (LABEL_COLOR, 1.0))[0]
 
 
-def layer_page(pcb, layer, body, out_png, scale, mirror, work):
+def layer_page(pcb, layer, under, out_png, scale, mirror, work):
     """One page: the board body, the layer over it in its own color, and the layer name."""
     pdf = os.path.join(work, "page-%s.pdf" % layer)
     plot_layer(pcb, layer, pdf, scale, mirror)
-    art = os.path.join(work, "page-%s.png" % layer)
-    ink = page_ink(layer)
-    tint(pdf, art, ink, 1.0, DPI)
-    size = identify(body, "%wx%h")
-    width = int(size.split("x")[0])
-    step = max(12, width // LABEL_DIVISOR)
-    run([MAGICK, "-size", size, "xc:" + PAGE, body, "-compose", "over", "-composite",
-        art, "-compose", "over", "-composite",
-        "-gravity", "North", "-pointsize", str(step), "-fill", LABEL_COLOR,
-        "-annotate", "+0+%d" % step, layer, out_png])
+    page = Image.new("RGBA", under.size, PAGE)
+    page = Image.alpha_composite(page, under)
+    page = Image.alpha_composite(page, tint(pdf, page_ink(layer), 1.0, DPI))
+
+    step = max(12, page.width // LABEL_DIVISOR)
+    font = label_font(step)
+    draw = ImageDraw.Draw(page)
+    box = draw.textbbox((0, 0), layer, font=font)
+    draw.text(((page.width - box[2] + box[0]) // 2, step), layer, font=font,
+        fill=LABEL_COLOR)
+    page.convert("RGB").save(out_png)
+
+
+def write_pdf(pages, out, density):
+    """Assemble full-page images into a PDF, each one losslessly compressed.
+
+    Pillow's own PDF writer cannot be used here: it encodes RGB as JPEG, whose ringing is
+    plain to see along the sharp edges of a plot, and writes indexed images uncompressed.
+    """
+    body = bytearray(b"%PDF-1.4\n")
+    offsets = []
+
+    def add(chunk):
+        offsets.append(len(body))
+        body.extend(b"%d 0 obj\n" % len(offsets))
+        body.extend(chunk)
+        body.extend(b"\nendobj\n")
+
+    # Object 1 is the catalog and object 2 the page tree. Each page then takes three more:
+    # the page itself, its one-line content stream, and the image it draws.
+    first = 3
+    kids = " ".join("%d 0 R" % (first + n * 3) for n in range(len(pages)))
+    add(b"<< /Type /Catalog /Pages 2 0 R >>")
+    add(("<< /Type /Pages /Count %d /Kids [%s] >>" % (len(pages), kids)).encode())
+    for index, path in enumerate(pages):
+        image = Image.open(path).convert("RGB")
+        width, height = image.size
+        across, down = width * 72.0 / density, height * 72.0 / density
+        base = first + index * 3
+        add(("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 %.2f %.2f]"
+            " /Resources << /XObject << /Im0 %d 0 R >> >> /Contents %d 0 R >>"
+            % (across, down, base + 2, base + 1)).encode())
+        draw = ("q %.2f 0 0 %.2f 0 0 cm /Im0 Do Q" % (across, down)).encode()
+        add(("<< /Length %d >>\nstream\n" % len(draw)).encode() + draw + b"\nendstream")
+        data = zlib.compress(image.tobytes(), 9)
+        add(("<< /Type /XObject /Subtype /Image /Width %d /Height %d /ColorSpace"
+            " /DeviceRGB /BitsPerComponent 8 /Filter /FlateDecode /Length %d >>\nstream\n"
+            % (width, height, len(data))).encode() + data + b"\nendstream")
+
+    table = len(body)
+    body.extend(("xref\n0 %d\n0000000000 65535 f \n" % (len(offsets) + 1)).encode())
+    for offset in offsets:
+        body.extend(("%010d 00000 n \n" % offset).encode())
+    body.extend(("trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n"
+        % (len(offsets) + 1, table)).encode())
+    with open(out, "wb") as handle:
+        handle.write(body)
 
 
 def build_layers_pdf(project, outdir, tag, work, scale):
@@ -603,8 +686,7 @@ def build_layers_pdf(project, outdir, tag, work, scale):
         True: substrate(project.pcb, work, scale, True, "back")}
     outlines = {False: outline(project.pcb, work, scale, False, "front"),
         True: outline(project.pcb, work, scale, True, "back")}
-    fades = {False: faded(bodies[False], work, "front"),
-        True: faded(bodies[True], work, "back")}
+    fades = {False: faded(bodies[False]), True: faded(bodies[True])}
     pages = []
     for layer in PLOT_LAYERS:
         mirror = layer.startswith("B.")
@@ -618,7 +700,7 @@ def build_layers_pdf(project, outdir, tag, work, scale):
         layer_page(project.pcb, layer, under, page, scale, mirror, work)
         pages.append(page)
     out = os.path.join(outdir, project.asset(tag, "layers.pdf"))
-    run([MAGICK] + pages + ["-units", "PixelsPerInch", "-density", str(DPI), out])
+    write_pdf(pages, out, DPI)
     return out
 
 
@@ -876,7 +958,7 @@ def do_publish(project):
 
 
 def main():
-    global KICAD_CLI, MAGICK
+    global KICAD_CLI
     parser = argparse.ArgumentParser(prog="ki-release", description=DESCRIPTION,
         epilog=EPILOG,
         formatter_class=lambda prog: argparse.RawDescriptionHelpFormatter(prog, width=99))
@@ -898,9 +980,10 @@ def main():
     KICAD_CLI = find_kicad_cli()
     if not KICAD_CLI:
         die("no kicad-cli found; set KICAD_CLI to it")
-    MAGICK = find_magick()
-    if not MAGICK and not (args.publish or args.produced):
-        die("ImageMagick's magick is not on PATH; set MAGICK to it")
+    if IMAGING_PROBLEM and not (args.publish or args.produced):
+        die("%s\n          Install the imaging libraries with:\n"
+            "          python -m pip install --user pypdfium2 pillow numpy"
+            % IMAGING_PROBLEM)
 
     project = Project(args.directory)
     os.chdir(project.root)
