@@ -18,9 +18,9 @@ from functools import partial
 
 from ki_common_lib import (die, exit_with, help_formatter, kicad_cli, open_path, parallel, run,
     shown)
-from ki_image_lib import (CUT_LAYER, DPI, LABEL_COLOR, PAGE, Image, Plotter, artwork,
-    board_scale, caption, counterpart, default_drill, placeholder_page, require_imaging, sharp,
-    sided_order, solid, substrate, tint, write_pdf)
+from ki_image_lib import (CUT_LAYER, DPI, LABEL_COLOR, PAGE, Image, Plotter, board_scale,
+    caption, counterpart, default_drill, placeholder_page, require_imaging, sharp, sided_order,
+    solid, substrate, tint, write_pdf)
 
 DESCRIPTION = "Build a KiCad board's release artifacts, and publish them as a GitHub draft."
 
@@ -323,7 +323,7 @@ def side_image(plotter, stack, mirror):
     drawn, edge = [], None
     for name in stack:
         color, alpha = COLORS[name]
-        drawn.append(tint(plotter.one(name, mirror, default_drill(name)), color, alpha, DPI))
+        drawn.append(tint(plotter.raster(name, mirror, default_drill(name)), color, alpha))
         if name == "Edge.Cuts":
             edge = drawn[-1]
 
@@ -421,7 +421,7 @@ def build_artwork(project, outdir, tag, plotter):
 
 def outline(plotter, mirror):
     """The board outline alone, for the pages that carry no substrate under them."""
-    return tint(plotter.one(CUT_LAYER, mirror, 0), OUTLINE_INK, 1.0, DPI)
+    return tint(plotter.raster(CUT_LAYER, mirror, 0), OUTLINE_INK, 1.0)
 
 
 def faded(body):
@@ -471,7 +471,7 @@ def build_layers_pdf(project, outdir, tag, plotter):
     # Rasterized and judged before any page is built, because whether an empty layer
     # deserves a placeholder depends on a layer that may come later.
     masks = dict(zip(layers, parallel(
-        partial(artwork, plotter.one(name, name.startswith("B."), default_drill(name)), DPI)
+        partial(plotter.raster, name, name.startswith("B."), default_drill(name))
         for name in layers)))
     bare = dict((name, not masks[name].getbbox()) for name in layers)
 

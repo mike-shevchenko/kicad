@@ -17,7 +17,7 @@ from ki_common_lib import die, exit_with, shown
 VERBS = (
     ("cut-signature", "ki_cut_signature",
         "cut the pixel signature out of a filled polygon in a footprint"),
-    ("diff", "ki_diff", "run KiDiff on Windows: plain CLI, git diff driver, Fork diff tool"),
+    ("diff", "ki_diff", "compare two versions of a board into a PDF: for git, Fork, or by hand"),
     ("draw-outline", "ki_draw_outline",
         "draw a connector on a schematic sheet, or make a footprint for one"),
     ("invert-logo", "ki_invert_logo", "invert a knocked-out logo footprint"),

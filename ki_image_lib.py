@@ -1,12 +1,15 @@
 """What the ki tools that draw share: plotting a board's layers, and making pages of them."""
 # Written with the help of Claude Opus 5.
 
+import hashlib
 import os
+import re
+import textwrap
 import threading
 import zlib
 from functools import partial
 
-from ki_common_lib import board_layers, die, kicad_cli, parallel, run, shown
+from ki_common_lib import board_layers, die, form_end, kicad_cli, parallel, run, shown
 
 # The imaging is pure Python. pypdfium2 ships its renderer inside the wheel, so nothing has
 # to be installed outside pip. scipy is optional and only makes one step quicker. A tool
@@ -14,10 +17,10 @@ from ki_common_lib import board_layers, die, kicad_cli, parallel, run, shown
 try:
     import numpy
     import pypdfium2
-    from PIL import Image, ImageDraw, ImageFont, ImageOps
+    from PIL import Image, ImageChops, ImageDraw, ImageFont, ImageOps
 except ImportError as problem:
     IMAGING_PROBLEM = problem
-    numpy = pypdfium2 = Image = ImageDraw = ImageFont = ImageOps = None
+    numpy = pypdfium2 = Image = ImageChops = ImageDraw = ImageFont = ImageOps = None
 else:
     IMAGING_PROBLEM = None
 
@@ -38,9 +41,15 @@ PLACEHOLDER_COLOR = "#A0A0A0"
 CUT_LAYER = "Edge.Cuts"
 COPPER = ("F.Cu", "B.Cu")
 
-# PDFium is not thread-safe, so plots are rasterized one at a time. That is a small part
-# of the work, and everything around it still runs in parallel.
+# PDFium is not thread-safe, so plots are rasterized one at a time. At 12 ms a plot that is
+# a small part of the work, and everything around it still runs in parallel; a pool of
+# worker interpreters was tried and saved nothing, the pipe eating what the rendering gave.
 PDFIUM_LOCK = threading.Lock()
+
+# What decides how big a board plots on its sheet: the paper, and every top-level form that
+# draws on Edge.Cuts, footprints included since their edge lines move with them.
+PAPER = re.compile(r"\n\t\(paper [^)]*\)")
+OUTLINE_FORM = re.compile(r"\n\t\((?:gr_\w+|footprint|dimension)\b")
 
 
 def require_imaging():
@@ -85,13 +94,15 @@ class Plotter:
     plot is requested as (name, mirror, drill), with the name as the board shows it.
     """
 
-    def __init__(self, pcb, work, scale):
-        self.pcb, self.work, self.scale = pcb, work, scale
+    def __init__(self, pcb, work, scale, antialias=True):
+        self.pcb, self.work, self.scale, self.antialias = pcb, work, scale, antialias
         self.layers = board_layers(pcb)
         self.names = [name for _stored, name in self.layers]
         self.stored = dict((name, stored) for stored, name in self.layers)
         self.stem = os.path.splitext(os.path.basename(pcb))[0]
         self.made = {}
+        self.rasters = {}
+        self.lock = threading.Lock()
 
     def plot(self, wanted):
         """Make every requested plot not made yet, the runs side by side.
@@ -112,6 +123,18 @@ class Plotter:
         self.plot([(name, mirror, drill)])
         return self.made[name, mirror, drill]
 
+    def raster(self, name, mirror, drill):
+        """The plot as an alpha mask at DPI, rasterized the first time it is asked for.
+
+        Locked, unlike plot(): rendering is serialized anyway, so holding the lock while
+        one raster is made costs nothing and lets any thread ask for any raster.
+        """
+        key = (name, mirror, drill)
+        with self.lock:
+            if key not in self.rasters:
+                self.rasters[key] = artwork(self.one(name, mirror, drill), DPI, self.antialias)
+            return self.rasters[key]
+
     def batch(self, names, mirror, drill):
         for name in names:
             if name not in self.stored:
@@ -119,9 +142,12 @@ class Plotter:
         directory = os.path.join(self.work,
             "plots-%s-%d" % ("back" if mirror else "front", drill))
         os.makedirs(directory, exist_ok=True)
+        # Without the popups, a plot is the same bytes whenever its layer is the same
+        # drawing, the timestamp aside; with them, every footprint that moved anywhere on
+        # the board leaves its mark in every layer's PDF.
         command = [kicad_cli(), "pcb", "export", "pdf", "--mode-separate",
             "--layers", ",".join(self.stored[name] for name in names),
-            "--black-and-white", "--scale", "%.4f" % self.scale,
+            "--black-and-white", "--no-property-popups", "--scale", "%.4f" % self.scale,
             "--drill-shape-opt", str(drill)]
         if mirror:
             command.append("--mirror")
@@ -135,19 +161,26 @@ class Plotter:
         return made
 
 
-def render_plot(pdf, density):
-    """One plot as a grayscale page: black artwork on white paper."""
+def render_plot(pdf, density, antialias=True):
+    """One plot as a grayscale page: black artwork on white paper.
+
+    Rendered as gray from the start: PDFium then writes one byte per pixel instead of
+    four, and nothing has to be converted, which is nearly three times quicker. Without
+    antialiasing every pixel is wholly ink or wholly paper.
+    """
     with PDFIUM_LOCK:
         document = pypdfium2.PdfDocument(pdf)
         try:
-            return document[0].render(scale=density / 72.0).to_pil().convert("L")
+            return document[0].render(scale=density / 72.0, grayscale=True,
+                no_smoothtext=not antialias, no_smoothpath=not antialias,
+                no_smoothimage=not antialias).to_pil()
         finally:
             document.close()
 
 
-def artwork(pdf, density):
+def artwork(pdf, density, antialias=True):
     """A plot as an alpha mask: opaque where the layer drew, clear on blank paper."""
-    return ImageOps.invert(render_plot(pdf, density))
+    return ImageOps.invert(render_plot(pdf, density, antialias))
 
 
 def solid(mask, color):
@@ -167,25 +200,22 @@ def dimmed(mask, alpha):
     return mask.point(lambda value: int(value * alpha))
 
 
-def tint(pdf, color, alpha, density):
-    """A plot rasterized into artwork of one color on transparency."""
-    mask = artwork(pdf, density)
-    if alpha < 1.0:
-        mask = dimmed(mask, alpha)
-    return solid(mask, color)
+def tint(mask, color, alpha):
+    """A raster as artwork of one color on transparency."""
+    return solid(dimmed(mask, alpha) if alpha < 1.0 else mask, color)
 
 
-def enclosed(page):
-    """Mask of what a page's ink encloses, dropping the outside and the ink itself.
+def enclosed(mask):
+    """Mask of what a plot's ink encloses, dropping the outside and the ink itself.
 
-    Labelling the white regions and discarding the one touching a corner is the same idea
+    Labelling the blank regions and discarding the one touching a corner is the same idea
     as flooding that corner, but Pillow's flood fill is a Python loop and costs seconds.
     """
-    white = numpy.asarray(page) > 127
+    white = numpy.asarray(mask) < 128
     try:
         from scipy import ndimage
     except ImportError:
-        flat = page.point(lambda value: 255 if value > 127 else 0)
+        flat = mask.point(lambda value: 255 if value < 128 else 0)
         ImageDraw.floodfill(flat, (0, 0), 0)
         return flat
     labels, _count = ndimage.label(white)
@@ -193,12 +223,34 @@ def enclosed(page):
     return Image.fromarray((body * 255).astype("uint8"), "L")
 
 
-def board_scale(pcb, work):
+def outline_key(pcb):
+    """A digest of what the board's scale on its sheet depends on, and of the kicad-cli build
+    that plots it, so a remembered scale is reused only while both are the same."""
+    text = open(pcb, encoding="utf-8", errors="replace").read()
+    parts = [PAPER.search(text).group(0) if PAPER.search(text) else ""]
+    for form in OUTLINE_FORM.finditer(text):
+        start = form.start() + 1
+        body = text[start:form_end(text, start)]
+        if '"Edge.Cuts"' in body:
+            parts.append(body)
+    cli = os.stat(kicad_cli())
+    parts.append("%d %d" % (cli.st_size, cli.st_mtime_ns))
+    return hashlib.sha1("\n".join(parts).encode("utf-8")).hexdigest()[:16]
+
+
+def board_scale(pcb, work, remember=None):
     """Measure the board on its sheet, and return the scale that fits it to the sheet.
 
     Working in pixels of a throwaway plot avoids parsing the sheet size and avoids pcbnew:
-    only the ratio matters, so the probe density cancels out.
+    only the ratio matters, so the probe density cancels out. The probe is a kicad-cli run,
+    so a tool run again and again can name a directory to remember the answer in.
     """
+    if remember:
+        memo = os.path.join(remember, "scale-%s.txt" % outline_key(pcb))
+        if os.path.isfile(memo):
+            with open(memo) as handle:
+                scale, aspect = handle.read().split()
+            return float(scale), float(aspect)
     probe = Plotter(pcb, os.path.join(work, "probe"), 1.0).one(CUT_LAYER, False, 0)
     mask = sharp(artwork(probe, PROBE_DPI))
     page_w, page_h = mask.size
@@ -207,7 +259,11 @@ def board_scale(pcb, work):
         die("the board outline is empty - is there anything on Edge.Cuts?")
     board_w, board_h = box[2] - box[0], box[3] - box[1]
     scale = min(page_w * PAGE_FILL / board_w, page_h * PAGE_FILL / board_h)
-    return scale, float(board_w) / board_h
+    aspect = float(board_w) / board_h
+    if remember:
+        with open(memo, "w") as handle:
+            handle.write("%r %r\n" % (scale, aspect))
+    return scale, aspect
 
 
 def body_mask(plotter, mirror):
@@ -216,7 +272,7 @@ def body_mask(plotter, mirror):
     An outline plot that also carries the drill shapes encloses exactly two kinds of
     region, the body and the holes, so the body falls out of it on its own.
     """
-    return enclosed(render_plot(plotter.one(CUT_LAYER, mirror, 2), DPI))
+    return enclosed(plotter.raster(CUT_LAYER, mirror, 2))
 
 
 def substrate(plotter, mirror):
@@ -253,24 +309,48 @@ def caption(page, text):
     write_at(page, text, step, step, LABEL_COLOR)
 
 
-def placeholder_page(name, word, size, out_png):
+def placeholder_page(name, word, size, out_png=None):
     """A page carrying a layer's name and one word in its middle, in place of a drawing."""
     page = Image.new("RGB", size, PAGE)
     caption(page, name)
     step = label_step(page)
     write_at(page, word, (page.height - step) // 2, step, PLACEHOLDER_COLOR)
-    page.save(out_png)
+    if out_png:
+        page.save(out_png)
+    return page
 
 
-def compressed_image(path):
-    """An image file as its size and its raw RGB bytes deflated, the slow part of a page."""
-    image = Image.open(path).convert("RGB")
+def text_page(title, lines, size, out_png=None):
+    """A page of text: the title as a caption, then the lines, wrapped to the page."""
+    page = Image.new("RGB", size, PAGE)
+    caption(page, title)
+    step = label_step(page)
+    font = label_font(step * 2 // 3)
+    draw = ImageDraw.Draw(page)
+    # A glyph of this face is about a third of the caption size wide, which sets the column.
+    columns = max(20, (page.width - 2 * step) * 3 // step)
+    top = 3 * step
+    for line in lines:
+        for piece in textwrap.wrap(line, columns) or [""]:
+            draw.text((step, top), piece, font=font, fill=LABEL_COLOR)
+            top += step
+    if out_png:
+        page.save(out_png)
+    return page
+
+
+def compressed_image(page, level):
+    """An image, or the path of one, as its size and its raw RGB bytes deflated."""
+    image = (page if not isinstance(page, str) else Image.open(page)).convert("RGB")
     width, height = image.size
-    return width, height, zlib.compress(image.tobytes(), 9)
+    return width, height, zlib.compress(image.tobytes(), level)
 
 
-def write_pdf(pages, out, density):
-    """Assemble full-page images into a PDF, each one losslessly compressed.
+def write_pdf(pages, out, density, level=9):
+    """Assemble full-page images, given as images or as files, into a PDF, each one
+    losslessly compressed.
+
+    Deflate level 9 by default; 6 gives a page a tenth larger in a third of the time.
 
     Pillow's own PDF writer cannot be used here: it encodes RGB as JPEG, whose ringing is
     plain to see along the sharp edges of a plot, and writes indexed images uncompressed.
@@ -291,7 +371,7 @@ def write_pdf(pages, out, density):
     add(b"<< /Type /Catalog /Pages 2 0 R >>")
     add(("<< /Type /Pages /Count %d /Kids [%s] >>" % (len(pages), kids)).encode())
     for index, (width, height, data) in enumerate(parallel(
-            partial(compressed_image, path) for path in pages)):
+            partial(compressed_image, path, level) for path in pages)):
         across, down = width * 72.0 / density, height * 72.0 / density
         base = first + index * 3
         add(("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 %.2f %.2f]"
