@@ -9,7 +9,7 @@ import os
 import stat
 import sys
 
-from ki_lib import die, exit_with, shown
+from ki_common_lib import die, exit_with, shown
 
 # One line per tool: the verb, the module beside this file that implements it, and what
 # it does. The module is imported only when its verb runs, so a tool that needs something

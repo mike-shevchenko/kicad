@@ -11,7 +11,7 @@ import shutil
 import sys
 from collections import Counter
 
-from ki_lib import exit_with, help_formatter
+from ki_common_lib import exit_with, help_formatter
 
 DESCRIPTION = "Rename a string in every KiCad file of the current directory."
 

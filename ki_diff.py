@@ -14,7 +14,7 @@ import sys
 import sysconfig
 import tempfile
 
-from ki_lib import die, ensure_kicad_python, exit_with, help_formatter, note, shown
+from ki_common_lib import die, ensure_kicad_python, exit_with, help_formatter, note, shown
 
 DESCRIPTION = "Run KiDiff on Windows: plain CLI, a git external-diff driver, or a Fork diff tool."
 

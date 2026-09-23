@@ -1,4 +1,4 @@
-"""What the ki tools share: reporting errors, finding KiCad, and reading its files."""
+"""What every ki tool shares: reporting errors, running things, and finding KiCad."""
 # Written with the help of Claude Opus 5.
 
 import argparse
@@ -8,8 +8,21 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
 
 RELAUNCH_FLAG = "KI_UNDER_KICAD_PYTHON"
+
+# Work that is subprocesses and C code releasing the GIL fills the cores from threads alone.
+# kicad-cli runs are held to fewer lanes than that, since each loads the board and, for the
+# 3D renders and the STEP model, its 3D models as well.
+WORKERS = os.cpu_count() or 4
+KICAD_LANES = threading.Semaphore(8)
+
+# One line of a board's own (layers ...) block: the id, the name the file stores, the kind,
+# and optionally a second name. KiCad renamed several layers and keeps the old name as the
+# stored one, so "F.SilkS" arrives carrying "F.Silkscreen" alongside it.
+LAYER_LINE = re.compile(r'\(\s*\d+\s+"([^"]+)"\s+\w+(?:\s+"([^"]+)")?\s*\)')
 
 
 class Failure(Exception):
@@ -54,6 +67,41 @@ def version_key(text):
     return parts or [0]
 
 
+def parallel(jobs):
+    """Run the jobs on worker threads, and return their results in the same order.
+
+    A failed job is raised here once the others have finished: a kicad-cli process cannot
+    be stopped once started, and a job cut short would leave half-written files behind.
+    """
+    jobs = list(jobs)
+    if len(jobs) <= 1:
+        return [job() for job in jobs]
+    with ThreadPoolExecutor(max_workers=min(len(jobs), WORKERS)) as pool:
+        futures = [pool.submit(job) for job in jobs]
+        return [future.result() for future in futures]
+
+
+def run(command, quiet=True):
+    """Run a command, and fail loudly with its own output when it does."""
+    with KICAD_LANES:
+        result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            universal_newlines=True)
+    if result.returncode:
+        sys.stderr.write(result.stdout or "")
+        die("%s failed with status %d" % (os.path.basename(command[0]), result.returncode))
+    if not quiet:
+        sys.stdout.write(result.stdout or "")
+    return result.stdout or ""
+
+
+def open_path(path):
+    """Show a file or directory the way a double-click would."""
+    if sys.platform == "win32":
+        os.startfile(path)  # noqa: S606
+    else:
+        subprocess.call(["xdg-open" if sys.platform != "darwin" else "open", path])
+
+
 def kicad_binaries(name):
     """Every Program Files\\KiCad\\<version>\\bin\\<name> installed, newest version last."""
     found = []
@@ -90,6 +138,19 @@ def find_kicad_cli():
     return found[-1] if found else None
 
 
+KICAD_CLI = None
+
+
+def kicad_cli():
+    """kicad-cli's path, looked up once, for every command line that starts with it."""
+    global KICAD_CLI
+    if KICAD_CLI is None:
+        KICAD_CLI = find_kicad_cli()
+        if not KICAD_CLI:
+            die("no kicad-cli found; set KICAD_CLI to it")
+    return KICAD_CLI
+
+
 def ensure_kicad_python(script):
     """Re-run the script under KiCad's Python when pcbnew is missing, so any python on PATH
     will do. The arguments go along unchanged, which is right whether the script was started
@@ -123,6 +184,25 @@ def default_board():
     if not hits:
         die("no .kicad_pcb here; name one, or run inside the project directory")
     die("several .kicad_pcb here (%s); name the one you mean" % ", ".join(hits))
+
+
+def board_layers(pcb):
+    """Every layer the board enables, in the order it writes them, as (stored, shown).
+
+    That order is KiCad's own, so a document follows the Board Setup list without any tool
+    having to hold an opinion about which layers exist or how they rank.
+    """
+    text = open(pcb, encoding="utf-8", errors="replace").read()
+    block = re.search(r"\n\t\(layers\n(.*?)\n\t\)\n", text, re.S)
+    if not block:
+        die("no (layers ...) block in %s" % shown(pcb))
+    found = []
+    for line in LAYER_LINE.finditer(block.group(1)):
+        stored, shown_as = line.group(1), line.group(2)
+        found.append((stored, shown_as or stored))
+    if not found:
+        die("the (layers ...) block of %s lists nothing" % shown(pcb))
+    return found
 
 
 def form_end(text, start):

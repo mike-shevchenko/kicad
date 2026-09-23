@@ -15,7 +15,7 @@ import shutil
 import sys
 import uuid
 
-from ki_lib import exit_with, form_end, help_formatter
+from ki_common_lib import exit_with, form_end, help_formatter
 
 DESCRIPTION = "Draw a connector on a schematic sheet, or make a footprint for one."
 

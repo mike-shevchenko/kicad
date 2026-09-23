@@ -9,7 +9,7 @@ import re
 import subprocess
 import tempfile
 
-from ki_lib import default_board, die, ensure_kicad_python, exit_with, help_formatter, note
+from ki_common_lib import default_board, die, ensure_kicad_python, exit_with, help_formatter, note
 
 # pcbnew is imported lazily, inside the centering path only: --cmp is purely textual and has
 # to run under any Python, while --center needs KiCad's own interpreter.

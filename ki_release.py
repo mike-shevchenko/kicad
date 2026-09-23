@@ -11,27 +11,16 @@ import os
 import re
 import shutil
 import subprocess
-import sys
 import tempfile
-import threading
 import zipfile
-import zlib
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from functools import partial
 
-from ki_lib import die, exit_with, find_kicad_cli, help_formatter, shown
-
-# The imaging is pure Python. pypdfium2 ships its renderer inside the wheel, so nothing has
-# to be installed outside pip. scipy is optional and only makes one step quicker.
-try:
-    import numpy
-    import pypdfium2
-    from PIL import Image, ImageDraw, ImageFont, ImageOps
-except ImportError as problem:
-    IMAGING_PROBLEM = problem
-else:
-    IMAGING_PROBLEM = None
+from ki_common_lib import (die, exit_with, help_formatter, kicad_cli, open_path, parallel, run,
+    shown)
+from ki_image_lib import (CUT_LAYER, DPI, LABEL_COLOR, PAGE, Image, Plotter, artwork,
+    board_scale, caption, counterpart, default_drill, placeholder_page, require_imaging, sharp,
+    sided_order, solid, substrate, tint, write_pdf)
 
 DESCRIPTION = "Build a KiCad board's release artifacts, and publish them as a GitHub draft."
 
@@ -107,11 +96,6 @@ Requirements
   scipy is not required, but one step runs far quicker when it is there.
 """
 
-# Rasterization is fixed at 400 dpi, and the board is scaled to fill the drawing sheet, so
-# the pixel size of a panel follows from the sheet alone and not from how big the board is.
-DPI = 400
-PROBE_DPI = 100  # density of the throwaway plot that measures the board on its sheet
-PAGE_FILL = 0.9  # fraction of the sheet the scaled board is fitted into
 CROP_MARGIN = 0.02  # border kept around the outline, as a fraction of panel width
 GUTTER = 0.04  # gap between the two panels, as a fraction of panel width
 
@@ -144,23 +128,14 @@ COLORS = {"Edge.Cuts": ("#D0D2CD", 1.0),
 # The mask has a color above but is left out of the stack, its pad openings only add rings.
 FRONT_STACK = ("F.Silkscreen", "F.Cu", "Edge.Cuts")
 BACK_STACK = ("B.Silkscreen", "B.Cu", "Edge.Cuts")
-COPPER = ("F.Cu", "B.Cu")
 
 # What the fabricator receives. Pinned, so that Fab and Courtyard edits cannot register as
 # changes to the manufactured board.
 FAB_LAYERS = ("F.Cu", "B.Cu", "F.Mask", "B.Mask", "F.Silkscreen", "B.Silkscreen", "Edge.Cuts")
 
-# A page of the layer plot: the board body dark so that pale artwork reads on it, the page
-# around and through the drill holes left white, and the layer named at the top.
-SUBSTRATE = "#24402E"
-PAGE = "white"
-LABEL_COLOR = "#303030"
-LABEL_DIVISOR = 24  # the page width over this gives the label point size, and its margin
-
 # An empty layer still gets a page when the other side of the board has one, so that a
 # two-page view keeps showing a front and its back together rather than drifting apart.
 BLANK_WORD = "BLANK"
-BLANK_COLOR = "#A0A0A0"
 
 # The Fab layers are drawings rather than artwork, so their pages carry no substrate, only
 # the board outline for context. KiCad's own colors are chosen for a dark canvas and vanish
@@ -171,14 +146,8 @@ OUTLINE_INK = "#909090"
 
 # The cut runs along the edge of the body, so on its own page the body is faded and the cut
 # drawn in a color nothing else uses. Otherwise the line merges into the boundary it defines.
-CUT_LAYER = "Edge.Cuts"
 CUT_INK = "#FF2020"
 CUT_FADE = 0.35
-
-# One line of the board's own (layers ...) block: the id, the name the file stores, the
-# kind, and optionally a second name. KiCad renamed several layers and keeps the old name
-# as the stored one, so "F.SilkS" arrives carrying "F.Silkscreen" alongside it.
-LAYER_LINE = re.compile(r'\(\s*\d+\s+"([^"]+)"\s+\w+(?:\s+"([^"]+)")?\s*\)')
 
 RENDER_TILT_SIZE = (1600, 1200)
 RENDER_FLAT_LONG_SIDE = 1600
@@ -202,46 +171,6 @@ fabrication output may no longer change, because boards carrying it exist.
 
 REVISION = re.compile(r'\(rev\s+"([^"]*)"\)')
 PRODUCED = re.compile(r"^\s*(?:[-*]\s+)?(\S+)\s+produced\b", re.MULTILINE)
-
-
-KICAD_CLI = None
-
-# The build is subprocesses and C code that release the GIL, so threads are enough to fill
-# the cores. kicad-cli runs are held to fewer lanes than that, since each loads the board
-# and, for the renders and the STEP model, its 3D models as well.
-WORKERS = os.cpu_count() or 4
-KICAD_LANES = threading.Semaphore(8)
-
-# PDFium is not thread-safe, so plots are rasterized one at a time. That is a small part
-# of the work, and everything around it still runs in parallel.
-PDFIUM_LOCK = threading.Lock()
-
-
-def parallel(jobs):
-    """Run the jobs on worker threads, and return their results in the same order.
-
-    A failed job is raised here once the others have finished: a kicad-cli process cannot
-    be stopped once started, and a job cut short would leave half-written files behind.
-    """
-    jobs = list(jobs)
-    if len(jobs) <= 1:
-        return [job() for job in jobs]
-    with ThreadPoolExecutor(max_workers=min(len(jobs), WORKERS)) as pool:
-        futures = [pool.submit(job) for job in jobs]
-        return [future.result() for future in futures]
-
-
-def run(command, quiet=True):
-    """Run a command, and fail loudly with its own output when it does."""
-    with KICAD_LANES:
-        result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            universal_newlines=True)
-    if result.returncode:
-        sys.stderr.write(result.stdout or "")
-        die("%s failed with status %d" % (os.path.basename(command[0]), result.returncode))
-    if not quiet:
-        sys.stdout.write(result.stdout or "")
-    return result.stdout or ""
 
 
 def git(*args, **kwargs):
@@ -271,7 +200,7 @@ def gh_json(*args):
 
 
 def kicad_version():
-    return run([KICAD_CLI, "version"]).strip()
+    return run([kicad_cli(), "version"]).strip()
 
 
 class Project(object):
@@ -311,25 +240,6 @@ class Project(object):
         return "%s-%s-%s" % (self.name, tag, suffix)
 
 
-def board_layers(pcb):
-    """Every layer the board enables, in the order it writes them, as (stored, shown).
-
-    That order is KiCad's own, so the document follows the Board Setup list without this
-    script having to hold an opinion about which layers exist or how they rank.
-    """
-    text = open(pcb, encoding="utf-8", errors="replace").read()
-    block = re.search(r"\n\t\(layers\n(.*?)\n\t\)\n", text, re.S)
-    if not block:
-        die("no (layers ...) block in %s" % shown(pcb))
-    found = []
-    for line in LAYER_LINE.finditer(block.group(1)):
-        stored, shown_as = line.group(1), line.group(2)
-        found.append((stored, shown_as or stored))
-    if not found:
-        die("the (layers ...) block of %s lists nothing" % shown(pcb))
-    return found
-
-
 def frozen_revisions(root):
     """Revisions that produced.md records as made, and so as unchangeable."""
     path = os.path.join(root, PRODUCED_FILE)
@@ -360,9 +270,9 @@ def next_tag(revision):
 def export_fab(pcb, directory):
     """Plot exactly what the fabricator gets: the pinned layer set, plus the drill files."""
     os.makedirs(directory, exist_ok=True)
-    run([KICAD_CLI, "pcb", "export", "gerbers", "--layers", ",".join(FAB_LAYERS),
+    run([kicad_cli(), "pcb", "export", "gerbers", "--layers", ",".join(FAB_LAYERS),
         "-o", directory + os.sep, pcb])
-    run([KICAD_CLI, "pcb", "export", "drill", "-o", directory + os.sep, pcb])
+    run([kicad_cli(), "pcb", "export", "drill", "-o", directory + os.sep, pcb])
 
 
 def fab_hash(directory):
@@ -400,138 +310,6 @@ def fab_hash_of_tag(project, tag):
         return fab_hash(out)
     finally:
         shutil.rmtree(work, ignore_errors=True)
-
-
-def render_plot(pdf, density):
-    """One plot as a grayscale page: black artwork on white paper."""
-    with PDFIUM_LOCK:
-        document = pypdfium2.PdfDocument(pdf)
-        try:
-            return document[0].render(scale=density / 72.0).to_pil().convert("L")
-        finally:
-            document.close()
-
-
-def artwork(pdf, density):
-    """A plot as an alpha mask: opaque where the layer drew, clear on blank paper."""
-    return ImageOps.invert(render_plot(pdf, density))
-
-
-def solid(mask, color):
-    """One flat color wearing that mask as its alpha."""
-    layer = Image.new("RGBA", mask.size, color)
-    layer.putalpha(mask)
-    return layer
-
-
-def sharp(mask):
-    """A mask with the antialiased fringe pushed to one side or the other."""
-    return mask.point(lambda value: 255 if value > 32 else 0)
-
-
-def default_drill(name):
-    """Copper plots carry the actual drill shapes so the holes read; the rest stay clean."""
-    return 2 if name in COPPER else 0
-
-
-class Plotter:
-    """Layer plots of one board at one scale, black on white, in as few runs as possible.
-
-    A kicad-cli run costs about half a second to load the board and a few milliseconds
-    per layer, so all plots sharing a mirror and drill setting come out of one run. A
-    plot is requested as (name, mirror, drill), with the name as the board shows it.
-    """
-
-    def __init__(self, pcb, work, scale):
-        self.pcb, self.work, self.scale = pcb, work, scale
-        self.layers = board_layers(pcb)
-        self.stored = dict((name, stored) for stored, name in self.layers)
-        self.stem = os.path.splitext(os.path.basename(pcb))[0]
-        self.made = {}
-
-    def plot(self, wanted):
-        """Make every requested plot not made yet, the runs side by side.
-
-        Not locked: the build requests everything it will need in one call before any
-        thread asks for a plot, so later calls only read what is already made.
-        """
-        groups = {}
-        for name, mirror, drill in wanted:
-            if (name, mirror, drill) not in self.made:
-                groups.setdefault((mirror, drill), []).append(name)
-        for made in parallel(partial(self.batch, names, mirror, drill)
-                for (mirror, drill), names in sorted(groups.items())):
-            self.made.update(made)
-
-    def one(self, name, mirror, drill):
-        """The PDF of one plot, made now if it was not requested before."""
-        self.plot([(name, mirror, drill)])
-        return self.made[name, mirror, drill]
-
-    def batch(self, names, mirror, drill):
-        for name in names:
-            if name not in self.stored:
-                die("%s is not a layer of %s" % (name, shown(self.pcb)))
-        directory = os.path.join(self.work,
-            "plots-%s-%d" % ("back" if mirror else "front", drill))
-        os.makedirs(directory, exist_ok=True)
-        command = [KICAD_CLI, "pcb", "export", "pdf", "--mode-separate",
-            "--layers", ",".join(self.stored[name] for name in names),
-            "--black-and-white", "--scale", "%.4f" % self.scale,
-            "--drill-shape-opt", str(drill)]
-        if mirror:
-            command.append("--mirror")
-        run(command + ["-o", directory, self.pcb])
-        made = {}
-        for name in names:
-            pdf = os.path.join(directory, "%s-%s.pdf" % (self.stem, name.replace(".", "_")))
-            if not os.path.exists(pdf):
-                die("kicad-cli did not write %s" % shown(pdf))
-            made[name, mirror, drill] = pdf
-        return made
-
-
-def tint(pdf, color, alpha, density):
-    """A plot rasterized into artwork of one color on transparency."""
-    mask = artwork(pdf, density)
-    if alpha < 1.0:
-        mask = mask.point(lambda value: int(value * alpha))
-    return solid(mask, color)
-
-
-def enclosed(page):
-    """Mask of what a page's ink encloses, dropping the outside and the ink itself.
-
-    Labelling the white regions and discarding the one touching a corner is the same idea
-    as flooding that corner, but Pillow's flood fill is a Python loop and costs seconds.
-    """
-    white = numpy.asarray(page) > 127
-    try:
-        from scipy import ndimage
-    except ImportError:
-        flat = page.point(lambda value: 255 if value > 127 else 0)
-        ImageDraw.floodfill(flat, (0, 0), 0)
-        return flat
-    labels, _count = ndimage.label(white)
-    body = white & (labels != labels[0, 0])
-    return Image.fromarray((body * 255).astype("uint8"), "L")
-
-
-def board_scale(pcb, work):
-    """Measure the board on its sheet, and return the scale that fits it to the sheet.
-
-    Working in pixels of a throwaway plot avoids parsing the sheet size and avoids pcbnew:
-    only the ratio matters, so the probe density cancels out.
-    """
-    probe = Plotter(pcb, os.path.join(work, "probe"), 1.0).one("Edge.Cuts", False, 0)
-    mask = sharp(artwork(probe, PROBE_DPI))
-    page_w, page_h = mask.size
-    box = mask.getbbox()
-    if not box:
-        die("the board outline is empty - is there anything on Edge.Cuts?")
-    board_w, board_h = box[2] - box[0], box[3] - box[1]
-    scale = min(page_w * PAGE_FILL / board_w, page_h * PAGE_FILL / board_h)
-    return scale, float(board_w) / board_h
 
 
 def side_plots(stack, mirror):
@@ -588,7 +366,7 @@ def render(pcb, out_png, side, tilted, aspect):
         zoom = FLAT_ZOOM
     # Quality stays at basic, and there is no --floor: both turn on the raytracer, whose
     # shadows fall across the board and read as features that are not there.
-    command = [KICAD_CLI, "pcb", "render", "-o", out_png, "--side", side,
+    command = [kicad_cli(), "pcb", "render", "-o", out_png, "--side", side,
         "--zoom", "%.2f" % zoom, "--width", str(width), "--height", str(height),
         "--quality", "basic", "--background", "opaque"]
     if tilted:
@@ -629,7 +407,7 @@ def build_gerbers(project, outdir, tag, work):
 def kicad_export(project, outdir, tag, suffix, arguments, source):
     """One kicad-cli export straight into the release directory."""
     out = os.path.join(outdir, project.asset(tag, suffix))
-    run([KICAD_CLI] + arguments + ["-o", out, source])
+    run([kicad_cli()] + arguments + ["-o", out, source])
     return out
 
 
@@ -639,15 +417,6 @@ def build_artwork(project, outdir, tag, plotter):
         + document_plots(plotter))
     return parallel([partial(build_board_image, project, outdir, tag, plotter),
         partial(build_layers_pdf, project, outdir, tag, plotter)])
-
-
-def substrate(plotter, mirror):
-    """The board body as an image: opaque where the substrate is, holes already punched.
-
-    An outline plot that also carries the drill shapes encloses exactly two kinds of
-    region, the body and the holes, so the body falls out of it on its own.
-    """
-    return solid(enclosed(render_plot(plotter.one(CUT_LAYER, mirror, 2), DPI)), SUBSTRATE)
 
 
 def outline(plotter, mirror):
@@ -662,16 +431,6 @@ def faded(body):
     return dim
 
 
-def label_font(size):
-    """A real face: Pillow's built-in font is a fixed bitmap, far too small for a page."""
-    for name in ("arial.ttf", "segoeui.ttf", "DejaVuSans.ttf", "LiberationSans-Regular.ttf"):
-        try:
-            return ImageFont.truetype(name, size)
-        except OSError:
-            continue
-    return ImageFont.load_default()
-
-
 def page_ink(layer):
     if layer in OUTLINE_ONLY:
         return INK
@@ -680,92 +439,14 @@ def page_ink(layer):
     return COLORS.get(layer, (LABEL_COLOR, 1.0))[0]
 
 
-def write_at(page, text, top, size, color):
-    """One line, horizontally centered, with its top edge at the given height."""
-    font = label_font(size)
-    draw = ImageDraw.Draw(page)
-    box = draw.textbbox((0, 0), text, font=font)
-    draw.text(((page.width - box[2] + box[0]) // 2, top), text, font=font, fill=color)
-
-
-def blank_page(name, size, out_png):
-    """A placeholder page, carrying the layer name and nothing that was drawn on it."""
-    page = Image.new("RGB", size, PAGE)
-    step = max(12, page.width // LABEL_DIVISOR)
-    write_at(page, name, step, step, LABEL_COLOR)
-    write_at(page, BLANK_WORD, (page.height - step) // 2, step, BLANK_COLOR)
-    page.save(out_png)
-
-
-def counterpart(name):
-    """The same layer on the other side of the board, or None for one that has no side."""
-    if name.startswith("F."):
-        return "B." + name[2:]
-    if name.startswith("B."):
-        return "F." + name[2:]
-    return None
-
-
 def layer_page(name, mask, under, out_png):
     """One page: the board body, the layer over it in its own color, and the layer name."""
     page = Image.new("RGBA", under.size, PAGE)
     page = Image.alpha_composite(page, under)
     page = Image.alpha_composite(page, solid(mask, page_ink(name)))
 
-    step = max(12, page.width // LABEL_DIVISOR)
-    write_at(page, name, step, step, LABEL_COLOR)
+    caption(page, name)
     page.convert("RGB").save(out_png)
-
-
-def compressed_image(path):
-    """An image file as its size and its raw RGB bytes deflated, the slow part of a page."""
-    image = Image.open(path).convert("RGB")
-    width, height = image.size
-    return width, height, zlib.compress(image.tobytes(), 9)
-
-
-def write_pdf(pages, out, density):
-    """Assemble full-page images into a PDF, each one losslessly compressed.
-
-    Pillow's own PDF writer cannot be used here: it encodes RGB as JPEG, whose ringing is
-    plain to see along the sharp edges of a plot, and writes indexed images uncompressed.
-    """
-    body = bytearray(b"%PDF-1.4\n")
-    offsets = []
-
-    def add(chunk):
-        offsets.append(len(body))
-        body.extend(b"%d 0 obj\n" % len(offsets))
-        body.extend(chunk)
-        body.extend(b"\nendobj\n")
-
-    # Object 1 is the catalog and object 2 the page tree. Each page then takes three more:
-    # the page itself, its one-line content stream, and the image it draws.
-    first = 3
-    kids = " ".join("%d 0 R" % (first + n * 3) for n in range(len(pages)))
-    add(b"<< /Type /Catalog /Pages 2 0 R >>")
-    add(("<< /Type /Pages /Count %d /Kids [%s] >>" % (len(pages), kids)).encode())
-    for index, (width, height, data) in enumerate(parallel(
-            partial(compressed_image, path) for path in pages)):
-        across, down = width * 72.0 / density, height * 72.0 / density
-        base = first + index * 3
-        add(("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 %.2f %.2f]"
-            " /Resources << /XObject << /Im0 %d 0 R >> >> /Contents %d 0 R >>"
-            % (across, down, base + 2, base + 1)).encode())
-        draw = ("q %.2f 0 0 %.2f 0 0 cm /Im0 Do Q" % (across, down)).encode()
-        add(("<< /Length %d >>\nstream\n" % len(draw)).encode() + draw + b"\nendstream")
-        add(("<< /Type /XObject /Subtype /Image /Width %d /Height %d /ColorSpace"
-            " /DeviceRGB /BitsPerComponent 8 /Filter /FlateDecode /Length %d >>\nstream\n"
-            % (width, height, len(data))).encode() + data + b"\nendstream")
-
-    table = len(body)
-    body.extend(("xref\n0 %d\n0000000000 65535 f \n" % (len(offsets) + 1)).encode())
-    for offset in offsets:
-        body.extend(("%010d 00000 n \n" % offset).encode())
-    body.extend(("trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n"
-        % (len(offsets) + 1, table)).encode())
-    with open(out, "wb") as handle:
-        handle.write(body)
 
 
 def document_plots(plotter):
@@ -786,14 +467,7 @@ def build_layers_pdf(project, outdir, tag, plotter):
     bodies = {False: front, True: back}
     outlines = {False: front_outline, True: back_outline}
     fades = {False: faded(bodies[False]), True: faded(bodies[True])}
-    # Pages of a pair face each other in a two-page view only while nothing single-sided
-    # comes between them, so Edge.Cuts, Margin and the User layers collect at the back. A
-    # layer counts as sided when the board also declares its other half, which needs no
-    # list of names - the F. and B. prefixes say it.
-    names = [name for _stored, name in plotter.layers]
-    present = set(names)
-    layers = ([name for name in names if counterpart(name) in present]
-        + [name for name in names if counterpart(name) not in present])
+    layers = sided_order(plotter.names)
     # Rasterized and judged before any page is built, because whether an empty layer
     # deserves a placeholder depends on a layer that may come later.
     masks = dict(zip(layers, parallel(
@@ -810,7 +484,7 @@ def build_layers_pdf(project, outdir, tag, plotter):
                 dropped.append(name)
                 continue
             placed.append(name)
-            jobs.append(partial(blank_page, name, bodies[mirror].size, page))
+            jobs.append(partial(placeholder_page, name, BLANK_WORD, bodies[mirror].size, page))
             pages.append(page)
             continue
         if name in OUTLINE_ONLY:
@@ -980,13 +654,6 @@ def release_notes(project, tag, record, owner):
     return "\n".join(lines) + "\n"
 
 
-def open_path(path):
-    if sys.platform == "win32":
-        os.startfile(path)  # noqa: S606
-    else:
-        subprocess.call(["xdg-open" if sys.platform != "darwin" else "open", path])
-
-
 def release_dir(root, tag):
     return os.path.join(root, "release", tag)
 
@@ -1100,7 +767,6 @@ def do_publish(project):
 
 
 def main():
-    global KICAD_CLI
     parser = argparse.ArgumentParser(prog="ki release", description=DESCRIPTION,
         epilog=EPILOG,
         formatter_class=help_formatter)
@@ -1119,13 +785,9 @@ def main():
         help="upload what is already built as a draft release; build nothing")
     args = parser.parse_args()
 
-    KICAD_CLI = find_kicad_cli()
-    if not KICAD_CLI:
-        die("no kicad-cli found; set KICAD_CLI to it")
-    if IMAGING_PROBLEM and not (args.publish or args.produced):
-        die("%s\n          Install the imaging libraries with:\n"
-            "          python -m pip install --user pypdfium2 pillow numpy"
-            % IMAGING_PROBLEM)
+    kicad_cli()
+    if not (args.publish or args.produced):
+        require_imaging()
 
     project = Project(args.directory)
     os.chdir(project.root)

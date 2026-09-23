@@ -20,7 +20,7 @@ import argparse
 import re
 import uuid
 
-from ki_lib import exit_with, form_end, help_formatter
+from ki_common_lib import exit_with, form_end, help_formatter
 
 PIXEL = 0.15
 MARGIN = 1  # margin from the edges, in pixels

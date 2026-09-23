@@ -20,7 +20,7 @@ import argparse
 import os
 import uuid
 
-from ki_lib import exit_with, help_formatter
+from ki_common_lib import exit_with, help_formatter
 
 LAYER = "F.Mask"
 THRESHOLD = 128

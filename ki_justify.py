@@ -7,7 +7,7 @@ import argparse
 import os
 import re
 
-from ki_lib import (default_board, die, ensure_kicad_python, exit_with, form_end,
+from ki_common_lib import (default_board, die, ensure_kicad_python, exit_with, form_end,
     help_formatter, shown)
 
 DESCRIPTION = "Rejustify a text or field, shifting it so its position on the board is kept."
