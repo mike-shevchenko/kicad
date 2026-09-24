@@ -19,10 +19,10 @@ from functools import partial
 from ki_common_lib import (die, exit_with, form_end, help_formatter, kicad_cli, note, open_path,
     parallel, run, shown, version_key)
 from ki_diff import compare as compare_boards
-from ki_image_lib import (CUT_LAYER, DPI, LABEL_COLOR, PAGE, Image, Plotter, board_scale, numpy,
-    captioned, counterpart, crop_margin, default_drill, outline_box, page_size, panel_rect,
-    placeholder_page, require_imaging, sibling_project, sided_order, solid, substrate, tint,
-    write_pdf)
+from ki_image_lib import (CUT_LAYER, DPI, INK, LABEL_COLOR, OUTLINE_INK, OUTLINE_ONLY, PAGE,
+    Image, Plotter, board_scale, captioned, counterpart, crop_margin, default_drill, numpy,
+    outline_box, page_size, panel_rect, placeholder_page, require_imaging, sibling_project,
+    sided_order, solid, substrate, tint, write_pdf)
 
 DESCRIPTION = "Build a KiCad board's release artifacts, and publish them as a GitHub draft."
 
@@ -148,12 +148,6 @@ FAB_LAYERS = ("F.Cu", "B.Cu", "F.Mask", "B.Mask", "F.Silkscreen", "B.Silkscreen"
 # two-page view keeps showing a front and its back together rather than drifting apart.
 BLANK_WORD = "BLANK"
 
-# The Fab layers are drawings rather than artwork, so their pages carry no substrate, only
-# the board outline for context. KiCad's own colors are chosen for a dark canvas and vanish
-# on a white one, so these two pages are drawn in ink instead.
-OUTLINE_ONLY = ("F.Fab", "B.Fab")
-INK = "#303030"
-OUTLINE_INK = "#909090"
 
 # The cut runs along the edge of the body, so on its own page the body is faded and the cut
 # drawn in a color nothing else uses. Otherwise the line merges into the boundary it defines.

@@ -43,6 +43,13 @@ LABEL_DIVISOR = 24  # the page width over this gives the label point size, and i
 PLACEHOLDER_COLOR = "#A0A0A0"
 
 CUT_LAYER = "Edge.Cuts"
+
+# The Fab layers are drawings rather than artwork, so their pages carry no substrate, only
+# the board outline for context. KiCad's own colors are chosen for a dark canvas and vanish
+# on a white one, so these two pages are drawn in ink instead.
+OUTLINE_ONLY = ("F.Fab", "B.Fab")
+INK = "#303030"
+OUTLINE_INK = "#909090"
 COPPER = ("F.Cu", "B.Cu")
 
 # PDFium is not thread-safe, so plots are rasterized one at a time. At 12 ms a plot that is

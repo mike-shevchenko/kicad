@@ -14,10 +14,10 @@ import tempfile
 from functools import partial
 
 from ki_common_lib import die, exit_with, help_formatter, note, open_path, parallel, shown
-from ki_image_lib import (CUT_LAYER, DPI, PAGE, SUBSTRATE, Image, ImageChops, Plotter,
-    body_mask, board_scale, captioned, counterpart, default_drill, dimmed, outline_box,
-    page_size, panel_rect, placeholder_page, require_imaging, sharp, sibling_project,
-    sided_order, text_page, write_pdf)
+from ki_image_lib import (CUT_LAYER, DPI, INK, OUTLINE_INK, OUTLINE_ONLY, PAGE, SUBSTRATE,
+    Image, ImageChops, Plotter, artwork, body_mask, board_scale, captioned, counterpart,
+    default_drill, dimmed, outline_box, page_size, panel_rect, placeholder_page, require_imaging,
+    sharp, sibling_project, sided_order, text_page, write_pdf)
 
 DESCRIPTION = "Compare two versions of a board, layer by layer, into a PDF."
 
@@ -37,7 +37,8 @@ What a page shows
   its own size, the page no larger than the board of either version with its margin and a
   band for the caption, so it prints at the board's size and reads on a phone as it will on
   the board; the new version's substrate dark, back layers mirrored, the holes of both
-  versions punched through.
+  versions punched through. The Fab pages are drawn as the layer PDF draws them, in ink on
+  white around the outlines of both versions, with no substrate or holes.
   Artwork present in both versions is drawn faint; what only the old version had is red, what
   only the new one has is cyan. A moved item is therefore a red copy and a cyan copy. The holes
   are compared the same way on every page: a hole both versions have is white, one only the old
@@ -226,11 +227,22 @@ def body(new, old, mirror):
     return under
 
 
+def outline_under(new, old, mirror):
+    """What a Fab page has under its drawing: white, with the outlines of both versions, as
+    the layer PDF draws them. Antialiased, since without it a thin outline breaks up."""
+    lines = [artwork(plotter.one(CUT_LAYER, mirror, 0), plotter.density)
+        for plotter in (old, new)]
+    under = Image.new("RGB", lines[0].size, PAGE)
+    under.paste(OUTLINE_INK, mask=ImageChops.lighter(*lines))
+    return under
+
+
 def diff_page(name, old, new, under, rect):
-    """One page: the body, the unchanged artwork faint, the old-only red, the new-only cyan."""
+    """One page: the body, the unchanged artwork faint, the old-only red, the new-only cyan.
+    On a Fab page the unchanged drawing is faint ink, as faint white would vanish on white."""
     both = ImageChops.multiply(old, new)
     page = under.copy()
-    page.paste(SAME_COLOR, mask=dimmed(both, SAME_ALPHA))
+    page.paste(INK if name in OUTLINE_ONLY else SAME_COLOR, mask=dimmed(both, SAME_ALPHA))
     page.paste(OLD_COLOR, mask=ImageChops.subtract(old, both))
     page.paste(NEW_COLOR, mask=ImageChops.subtract(new, both))
     return captioned(page.crop(rect), name)
@@ -283,10 +295,12 @@ def compare(old_file, new_file, labels, out, all_layers, work, remember=None):
         unsettled = names
     # The bodies first in the batch, since they take longest: they label the regions of
     # the outline plot while the layers behind them are still being rasterized.
-    results = parallel([partial(body, new, old, False), partial(body, new, old, True)]
+    results = parallel([partial(body, new, old, False), partial(body, new, old, True),
+        partial(outline_under, new, old, False), partial(outline_under, new, old, True)]
         + [partial(version_masks, old, new, name) for name in unsettled])
     bodies = {False: results[0], True: results[1]}
-    masks = dict(zip(unsettled, results[2:]))
+    outlines = {False: results[2], True: results[3]}
+    masks = dict(zip(unsettled, results[4:]))
     rects = dict((mirror, page_rect(old, new, mirror, bodies[mirror].size))
         for mirror in (False, True))
     changed = [name for name in unsettled if name not in same
@@ -296,8 +310,9 @@ def compare(old_file, new_file, labels, out, all_layers, work, remember=None):
     for name in sided_order(names):
         mirror = name.startswith("B.")
         if name in changed or all_layers:
-            jobs.append(partial(diff_page, name, masks[name][0], masks[name][1],
-                bodies[mirror], rects[mirror]))
+            under = outlines[mirror] if name in OUTLINE_ONLY else bodies[mirror]
+            jobs.append(partial(diff_page, name, masks[name][0], masks[name][1], under,
+                rects[mirror]))
         elif counterpart(name) in changed:
             jobs.append(partial(placeholder_page, name, UNCHANGED_WORD,
                 page_size(rects[mirror])))
