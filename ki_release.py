@@ -20,8 +20,9 @@ from ki_common_lib import (die, exit_with, form_end, help_formatter, kicad_cli, 
     parallel, run, shown, version_key)
 from ki_diff import compare as compare_boards
 from ki_image_lib import (CUT_LAYER, DPI, LABEL_COLOR, PAGE, Image, Plotter, board_scale, numpy,
-    caption, counterpart, default_drill, placeholder_page, require_imaging, sharp,
-    sibling_project, sided_order, solid, substrate, tint, write_pdf)
+    captioned, counterpart, crop_margin, default_drill, outline_box, page_size, panel_rect,
+    placeholder_page, require_imaging, sibling_project, sided_order, solid, substrate, tint,
+    write_pdf)
 
 DESCRIPTION = "Build a KiCad board's release artifacts, and publish them as a GitHub draft."
 
@@ -31,6 +32,12 @@ Building
   ki release --png
       The board image only: both sides side by side, front on the left, back mirrored as
       if you had flipped the board over. Written into the release directory and opened.
+
+  Everything is at exactly 400 dpi of the board itself, close to a phone's screen, so small
+  silkscreen can be judged there as it will read on the board, and prints at the board's own
+  size: the board image, recording that resolution, the straight-down render in the same
+  layout pixel for pixel, the tilted pair made to the same size, and the pages of the layer
+  PDF and of the diff, each the board and its margin under a band carrying the caption.
 
   ki release --render
       The 3D renders only, as two images: both sides straight down, laid out as the board
@@ -101,7 +108,6 @@ Requirements
   scipy is not required, but one step runs far quicker when it is there.
 """
 
-CROP_MARGIN = 0.02  # border kept around the outline, as a fraction of panel width
 GUTTER = 0.04  # gap between the two panels, as a fraction of panel width
 
 # KiCad's stock colors, hardcoded rather than read from a theme: the active theme is usually
@@ -154,12 +160,15 @@ OUTLINE_INK = "#909090"
 CUT_INK = "#FF2020"
 CUT_FADE = 0.35
 
-# KiCad has no fit-to-board under perspective, so the tilted views are zoomed out far enough
-# for any board to stay in view, rendered large, and cropped to what they drew. The board then
-# fills about 40% of the render, and comes out of the crop larger than a 1600 x 1200 render.
-RENDER_TILT_SIZE = (2400, 1800)
+# The tilted pair is made to the board image's pixel size. KiCad has no fit-to-board under
+# perspective, and frames the view by the image's height alone, whatever its width: the board
+# takes the same pixels and keeps its offset from the center. So a small probe render tells
+# the height that brings the pair to the target a little oversize, and the width that just
+# holds the board; the pair is then cropped to what was drawn, scaled down and centered.
 TILT_ROTATION = "-30,0,25"  # X looks down at the board, Z spins it so two edges show
-TILT_ZOOM = 0.62
+TILT_ZOOM = 0.62  # low enough that no board reaches the top or bottom of the view
+TILT_PROBE = (960, 480)  # KiCad rounds render sizes down to multiples of 16
+TILT_OVERSIZE = 1.05  # rendered this much larger than shown, and as much wider than the board
 
 # The straight-down renders are brought to the board image's scale by the outline. A render of
 # the board without its 3D models has a silhouette that is nothing but the outline; made at a
@@ -172,7 +181,7 @@ TILT_ZOOM = 0.62
 # twentieth of the view free on each side for parts that overhang the outline.
 FLAT_ZOOM = 0.9
 FLAT_FIT = 0.95
-FLAT_PROBE = 4  # the model-free render is made at this fraction of the size, as its divisor
+FLAT_PROBE = 2  # the model-free render is made at this fraction of the size, as its divisor
 FLAT_TOLERANCE = 4  # pixels by which the silhouette may exceed the outline without overhang
 MODEL_FORM = re.compile(r"\(model\s")
 
@@ -364,18 +373,21 @@ def side_plots(stack, mirror):
     return [(name, mirror, default_drill(name)) for name in stack]
 
 
-def outline_box(plotter, mirror):
-    """The board outline's box in the pixels of a plot at the plotter's scale."""
-    box = sharp(plotter.raster(CUT_LAYER, mirror, default_drill(CUT_LAYER))).getbbox()
-    if not box:
-        die("the board outline plotted empty at scale %.4f, so the %s side cannot be cropped"
-            % (plotter.scale, "back" if mirror else "front"))
-    return box
+def board_image_size(plotter):
+    """The board image's size in pixels, which follows from the outlines alone."""
+    sizes = []
+    for mirror in (False, True):
+        size = plotter.raster(CUT_LAYER, mirror, default_drill(CUT_LAYER)).size
+        rect = panel_rect(outline_box(plotter, mirror), size)
+        sizes.append((rect[2] - rect[0], rect[3] - rect[1]))
+    front, back = sizes
+    return front[0] + int(round(front[0] * GUTTER)) + back[0], max(front[1], back[1])
 
 
-def crop_margin(box):
-    """The border kept around the outline, the same for the board image and the renders."""
-    return int(round((box[2] - box[0]) * CROP_MARGIN))
+def save_png(image, path):
+    """Save an image at DPI of the board, recording it, so that it prints at natural size."""
+    image.save(path, dpi=(DPI, DPI))
+    return path
 
 
 def side_by_side(front, back):
@@ -401,10 +413,7 @@ def side_image(plotter, stack, mirror):
     for layer in drawn:
         page = Image.alpha_composite(page, layer)
 
-    box = outline_box(plotter, mirror)
-    margin = crop_margin(box)
-    return page.crop((max(0, box[0] - margin), max(0, box[1] - margin),
-        min(page.width, box[2] + margin), min(page.height, box[3] + margin))).convert("RGB")
+    return page.crop(panel_rect(outline_box(plotter, mirror), page.size)).convert("RGB")
 
 
 def build_board_image(project, outdir, tag, plotter):
@@ -412,8 +421,7 @@ def build_board_image(project, outdir, tag, plotter):
     front, back = parallel([partial(side_image, plotter, FRONT_STACK, False),
         partial(side_image, plotter, BACK_STACK, True)])
     out = os.path.join(outdir, project.asset(tag, "board.png"))
-    side_by_side(front, back).save(out)
-    return out
+    return save_png(side_by_side(front, back), out)
 
 
 def render(pcb, out_png, side, size, zoom, background, rotation=None):
@@ -428,14 +436,28 @@ def render(pcb, out_png, side, size, zoom, background, rotation=None):
     run(command + [pcb])
 
 
-def render_tilted(pcb, side, work):
+def tilt_rotation(side):
+    """The Z sign flips on the back, so the two tilts mirror instead of repeating."""
+    x, y, z = TILT_ROTATION.split(",")
+    return TILT_ROTATION if side == "top" else "%s,%s,%s" % (x, y, -float(z))
+
+
+def probe_tilted(pcb, side, work):
+    """A small tilted render: its size, and the box of what it drew."""
+    rendered = os.path.join(work, "tilt-probe-%s.png" % side)
+    render(pcb, rendered, side, TILT_PROBE, TILT_ZOOM, "transparent", tilt_rotation(side))
+    image = Image.open(rendered).convert("RGBA")
+    box = solid_box(image)
+    if not box:
+        die("the tilted %s render of the board came out empty" % side)
+    return image.size, box
+
+
+def render_tilted(pcb, side, size, work):
     """A side under a perspective projection, so the connectors read, cropped to what it drew
     with the board image's margin, on the board image's background."""
-    # The Z sign flips on the back, so the two tilts mirror instead of repeating.
-    x, y, z = TILT_ROTATION.split(",")
-    rotation = TILT_ROTATION if side == "top" else "%s,%s,%s" % (x, y, -float(z))
     rendered = os.path.join(work, "tilt-%s.png" % side)
-    render(pcb, rendered, side, RENDER_TILT_SIZE, TILT_ZOOM, "transparent", rotation)
+    render(pcb, rendered, side, size, TILT_ZOOM, "transparent", tilt_rotation(side))
     image = Image.open(rendered).convert("RGBA")
     box = solid_box(image)
     if not box:
@@ -554,18 +576,41 @@ def build_flat_renders(project, outdir, tag, plotter, work):
         panel = Image.alpha_composite(Image.new("RGBA", view.size, BACKGROUND), view)
         panels.append(panel.convert("RGB"))
     out = os.path.join(outdir, project.asset(tag, "3d.png"))
-    side_by_side(*panels).save(out)
-    return out
+    return save_png(side_by_side(*panels), out)
+
+
+def build_tilted_renders(project, outdir, tag, plotter, work):
+    """Both sides tilted, side by side, at the board image's size in pixels."""
+    sides = ("top", "bottom")
+    probes = parallel(partial(probe_tilted, project.pcb, side, work) for side in sides)
+    target = board_image_size(plotter)
+
+    # The pair as the probes would come out of the crop, margins and gutter included, and how
+    # much taller the renders must be for it to reach the target, with a little to spare.
+    widths = [box[2] - box[0] + 2 * crop_margin(box) for _size, box in probes]
+    heights = [box[3] - box[1] + 2 * crop_margin(box) for _size, box in probes]
+    pair = (widths[0] + int(round(widths[0] * GUTTER)) + widths[1], max(heights))
+    grow = min(float(target[0]) / pair[0], float(target[1]) / pair[1]) * TILT_OVERSIZE
+    jobs = []
+    for side, (size, box) in zip(sides, probes):
+        reach = max(size[0] / 2.0 - box[0], box[2] - size[0] / 2.0) * grow
+        render_size = (int(2 * reach * TILT_OVERSIZE) + 16, int(size[1] * grow) + 16)
+        jobs.append(partial(render_tilted, project.pcb, side, render_size, work))
+
+    image = side_by_side(*parallel(jobs))
+    shrink = min(float(target[0]) / image.width, float(target[1]) / image.height)
+    image = image.resize((int(round(image.width * shrink)), int(round(image.height * shrink))),
+        Image.LANCZOS)
+    canvas = Image.new("RGB", target, BACKGROUND)
+    canvas.paste(image, ((target[0] - image.width) // 2, (target[1] - image.height) // 2))
+    out = os.path.join(outdir, project.asset(tag, "3d-tilt.png"))
+    return save_png(canvas, out)
 
 
 def build_renders(project, outdir, tag, plotter, work):
     """The two straight-down views in one image, and the two tilted ones in another."""
-    flat, top, bottom = parallel([partial(build_flat_renders, project, outdir, tag, plotter,
-        work), partial(render_tilted, project.pcb, "top", work),
-        partial(render_tilted, project.pcb, "bottom", work)])
-    tilted = os.path.join(outdir, project.asset(tag, "3d-tilt.png"))
-    side_by_side(top, bottom).save(tilted)
-    return [flat, tilted]
+    return parallel([partial(build_flat_renders, project, outdir, tag, plotter, work),
+        partial(build_tilted_renders, project, outdir, tag, plotter, work)])
 
 
 def build_gerbers(project, outdir, tag, work):
@@ -632,14 +677,12 @@ def page_ink(layer):
     return COLORS.get(layer, (LABEL_COLOR, 1.0))[0]
 
 
-def layer_page(name, mask, under, out_png):
+def layer_page(name, mask, under, rect, out_png):
     """One page: the board body, the layer over it in its own color, and the layer name."""
     page = Image.new("RGBA", under.size, PAGE)
     page = Image.alpha_composite(page, under)
     page = Image.alpha_composite(page, solid(mask, page_ink(name)))
-
-    caption(page, name)
-    page.convert("RGB").save(out_png)
+    captioned(page.crop(rect), name).save(out_png)
 
 
 def document_plots(plotter):
@@ -660,6 +703,8 @@ def build_layers_pdf(project, outdir, tag, plotter):
     bodies = {False: front, True: back}
     outlines = {False: front_outline, True: back_outline}
     fades = {False: faded(bodies[False]), True: faded(bodies[True])}
+    rects = dict((mirror, panel_rect(outline_box(plotter, mirror), bodies[mirror].size))
+        for mirror in (False, True))
     layers = sided_order(plotter.names)
     # Rasterized and judged before any page is built, because whether an empty layer
     # deserves a placeholder depends on a layer that may come later.
@@ -680,7 +725,8 @@ def build_layers_pdf(project, outdir, tag, plotter):
                 dropped.append(name)
                 continue
             placed.append(name)
-            jobs.append(partial(placeholder_page, name, BLANK_WORD, bodies[mirror].size, page))
+            jobs.append(partial(placeholder_page, name, BLANK_WORD, page_size(rects[mirror]),
+                page))
             pages.append(page)
             continue
         if name in OUTLINE_ONLY:
@@ -689,7 +735,7 @@ def build_layers_pdf(project, outdir, tag, plotter):
             under = fades[mirror]
         else:
             under = bodies[mirror]
-        jobs.append(partial(layer_page, name, masks[name], under, page))
+        jobs.append(partial(layer_page, name, masks[name], under, rects[mirror], page))
         pages.append(page)
     parallel(jobs)
     if dropped:

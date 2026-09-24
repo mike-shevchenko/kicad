@@ -25,11 +25,14 @@ except ImportError as problem:
 else:
     IMAGING_PROBLEM = None
 
-# Rasterization is fixed at 400 dpi, and the board is scaled to fill the drawing sheet, so
-# the pixel size of a page follows from the sheet alone and not from how big the board is.
+# Every image is at 400 dpi of the board itself, close to a phone's screen, so that small
+# silkscreen reads there as it will on the board. The plot is scaled to fill the sheet, since
+# kicad-cli centers a plot only when its scale is not 1, and a board off the frame or larger
+# than the sheet would otherwise be cut off; rasterizing at 400 over the scale undoes it.
 DPI = 400
 PROBE_DPI = 100  # density of the throwaway plot that measures the board on its sheet
 PAGE_FILL = 0.9  # fraction of the sheet the scaled board is fitted into
+CROP_MARGIN = 0.02  # border kept around the outline, as a fraction of its width
 
 # A page: the board body dark so that pale artwork reads on it, the page around and through
 # the drill holes left white, and a caption at the top.
@@ -46,6 +49,8 @@ COPPER = ("F.Cu", "B.Cu")
 # a small part of the work, and everything around it still runs in parallel; a pool of
 # worker interpreters was tried and saved nothing, the pipe eating what the rendering gave.
 PDFIUM_LOCK = threading.Lock()
+
+INK_TRACE = 32  # the antialiased coverage, out of 255, above which a pixel counts as drawn
 
 # What decides how big a board plots on its sheet: the paper, and every top-level form that
 # draws on Edge.Cuts, footprints included since their edge lines move with them.
@@ -131,6 +136,7 @@ class Plotter:
             project = sibling_project(pcb)
         self.pcb = stage_board(pcb, os.path.join(work, "board"), project)
         self.work, self.scale, self.antialias = work, scale, antialias
+        self.density = DPI / scale
         self.layers = board_layers(self.pcb)
         self.names = [name for _stored, name in self.layers]
         self.stored = dict((name, stored) for stored, name in self.layers)
@@ -161,7 +167,8 @@ class Plotter:
         return self.made[name, mirror, drill]
 
     def raster(self, name, mirror, drill):
-        """The plot as an alpha mask at DPI, rasterized the first time it is asked for.
+        """The plot as an alpha mask at DPI of the board, rasterized the first time it is
+        asked for.
 
         Locked, unlike plot(): rendering is serialized anyway, so holding the lock while
         one raster is made costs nothing and lets any thread ask for any raster.
@@ -169,7 +176,8 @@ class Plotter:
         key = (name, mirror, drill)
         with self.lock:
             if key not in self.rasters:
-                self.rasters[key] = artwork(self.one(name, mirror, drill), DPI, self.antialias)
+                self.rasters[key] = artwork(self.one(name, mirror, drill), self.density,
+                    self.antialias)
             return self.rasters[key]
 
     def batch(self, names, mirror, drill):
@@ -229,7 +237,7 @@ def solid(mask, color):
 
 def sharp(mask):
     """A mask with the antialiased fringe pushed to one side or the other."""
-    return mask.point(lambda value: 255 if value > 32 else 0)
+    return mask.point(lambda value: 255 if value > INK_TRACE else 0)
 
 
 def dimmed(mask, alpha):
@@ -246,13 +254,15 @@ def enclosed(mask):
     """Mask of what a plot's ink encloses, dropping the outside and the ink itself.
 
     Labelling the blank regions and discarding the one touching a corner is the same idea
-    as flooding that corner, but Pillow's flood fill is a Python loop and costs seconds.
+    as flooding that corner, but Pillow's flood fill is a Python loop and costs seconds. Any
+    trace of ink counts as a wall, as sharp() has it: at DPI of the board an outline may be
+    under a pixel wide, covering no pixel even half, and a fill through it leaks out.
     """
-    white = numpy.asarray(mask) < 128
+    white = numpy.asarray(mask) <= INK_TRACE
     try:
         from scipy import ndimage
     except ImportError:
-        flat = mask.point(lambda value: 255 if value < 128 else 0)
+        flat = mask.point(lambda value: 255 if value <= INK_TRACE else 0)
         ImageDraw.floodfill(flat, (0, 0), 0)
         return flat
     labels, _count = ndimage.label(white)
@@ -303,13 +313,38 @@ def board_scale(pcb, work, remember=None):
     return scale, aspect
 
 
+def outline_box(plotter, mirror):
+    """The board outline's box in the plotter's rasters."""
+    box = sharp(plotter.raster(CUT_LAYER, mirror, default_drill(CUT_LAYER))).getbbox()
+    if not box:
+        die("the board outline plotted empty at scale %.4f, so the %s side cannot be cropped"
+            % (plotter.scale, "back" if mirror else "front"))
+    return box
+
+
+def crop_margin(box):
+    """The border kept around the outline, the same for every image and page."""
+    return int(round((box[2] - box[0]) * CROP_MARGIN))
+
+
+def panel_rect(box, size):
+    """The crop around an outline: its box with the margin, within the page."""
+    margin = crop_margin(box)
+    return (max(0, box[0] - margin), max(0, box[1] - margin),
+        min(size[0], box[2] + margin), min(size[1], box[3] + margin))
+
+
 def body_mask(plotter, mirror):
     """Where the substrate is: inside the outline, with the drill holes punched out.
 
     An outline plot that also carries the drill shapes encloses exactly two kinds of
-    region, the body and the holes, so the body falls out of it on its own.
+    region, the body and the holes, so the body falls out of it on its own. It is always
+    rasterized with antialiasing: without it, at DPI of the board, the curves of a thin
+    outline come out with gaps, and the fill leaks through them.
     """
-    return enclosed(plotter.raster(CUT_LAYER, mirror, 2))
+    if plotter.antialias:
+        return enclosed(plotter.raster(CUT_LAYER, mirror, 2))
+    return enclosed(artwork(plotter.one(CUT_LAYER, mirror, 2), plotter.density))
 
 
 def substrate(plotter, mirror):
@@ -344,6 +379,27 @@ def caption(page, text):
     """The page's title, centered along its top edge."""
     step = label_step(page)
     write_at(page, text, step, step, LABEL_COLOR)
+
+
+def caption_band(width):
+    """The height of the strip above a page's drawing that carries its caption."""
+    return 3 * max(12, width // LABEL_DIVISOR)
+
+
+def page_size(rect):
+    """The size of a page whose drawing is the rect, its caption band included."""
+    width = rect[2] - rect[0]
+    return width, rect[3] - rect[1] + caption_band(width)
+
+
+def captioned(drawing, title):
+    """A page: the drawing under a band carrying the title. A page is the board and its
+    margin, so that at DPI it prints at the board's own size, not the sheet's."""
+    band = caption_band(drawing.width)
+    page = Image.new("RGB", (drawing.width, drawing.height + band), PAGE)
+    page.paste(drawing.convert("RGB"), (0, band))
+    caption(page, title)
+    return page
 
 
 def placeholder_page(name, word, size, out_png=None):

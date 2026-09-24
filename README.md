@@ -17,10 +17,18 @@ The tools can also be run directly, as `python ki_VERB.py ...` - the launcher is
 
 NOTE: Some tools need some dependencies - they report if any of them is missing.
 
+## Images at natural size
+
+Every image and PDF page that `ki release` and `ki diff` draw is at exactly 400 dpi of the
+board itself, and the PNG files record it. That is close to a phone screen's density, so a
+board viewed at 100% appears at about its real size, and small silkscreen can be judged as it
+will read on the board. A PDF page is the board with a small margin, not the drawing sheet, so
+it prints at the board's own size.
+
 ## Comparing boards: `ki diff`
 
-`ki diff OLD.kicad_pcb NEW.kicad_pcb` writes a PDF with one page per layer that differs, the
-board filling the page: what only the old version had in red, what only the new one has in
+`ki diff OLD.kicad_pcb NEW.kicad_pcb` writes a PDF with one page per layer that differs, at the
+board's natural size: what only the old version had in red, what only the new one has in
 cyan, the rest faint, and the drill holes compared the same way on every page. A summary page
 at the end names the layers that changed. A diff of one small change takes a couple of
 seconds, since a layer whose plots are identical is settled without rendering anything.

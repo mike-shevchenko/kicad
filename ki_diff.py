@@ -15,8 +15,9 @@ from functools import partial
 
 from ki_common_lib import die, exit_with, help_formatter, note, open_path, parallel, shown
 from ki_image_lib import (CUT_LAYER, DPI, PAGE, SUBSTRATE, Image, ImageChops, Plotter,
-    board_scale, caption, counterpart, default_drill, dimmed, enclosed, placeholder_page,
-    require_imaging, sharp, sibling_project, sided_order, text_page, write_pdf)
+    body_mask, board_scale, captioned, counterpart, default_drill, dimmed, outline_box,
+    page_size, panel_rect, placeholder_page, require_imaging, sharp, sibling_project,
+    sided_order, text_page, write_pdf)
 
 DESCRIPTION = "Compare two versions of a board, layer by layer, into a PDF."
 
@@ -32,8 +33,11 @@ Modes
 
 What a page shows
 
-  One page per layer that differs, the board filling it the way ki release draws it: the new
-  version's substrate dark, back layers mirrored, the holes of both versions punched through.
+  One page per layer that differs, drawn the way ki release draws it: the board at 400 dpi of
+  its own size, the page no larger than the board of either version with its margin and a
+  band for the caption, so it prints at the board's size and reads on a phone as it will on
+  the board; the new version's substrate dark, back layers mirrored, the holes of both
+  versions punched through.
   Artwork present in both versions is drawn faint; what only the old version had is red, what
   only the new one has is cyan. A moved item is therefore a red copy and a cyan copy. The holes
   are compared the same way on every page: a hole both versions have is white, one only the old
@@ -209,7 +213,7 @@ def body(new, old, mirror):
     Pasted, not alpha-composited: a flat color through a mask is the simpler operation,
     and the page is RGB throughout, which is a quarter less memory to push around.
     """
-    mask = enclosed(new.raster(CUT_LAYER, mirror, 2))
+    mask = body_mask(new, mirror)
     under = Image.new("RGB", mask.size, PAGE)
     if not drills_differ(old, new, mirror):
         under.paste(SUBSTRATE, mask=mask)
@@ -222,15 +226,22 @@ def body(new, old, mirror):
     return under
 
 
-def diff_page(name, old, new, under):
+def diff_page(name, old, new, under, rect):
     """One page: the body, the unchanged artwork faint, the old-only red, the new-only cyan."""
     both = ImageChops.multiply(old, new)
     page = under.copy()
     page.paste(SAME_COLOR, mask=dimmed(both, SAME_ALPHA))
     page.paste(OLD_COLOR, mask=ImageChops.subtract(old, both))
     page.paste(NEW_COLOR, mask=ImageChops.subtract(new, both))
-    caption(page, name)
-    return page
+    return captioned(page.crop(rect), name)
+
+
+def page_rect(old, new, mirror, size):
+    """The crop of a page: the outlines of both versions with the margin, so that nothing of
+    either is left out when the outline itself changed."""
+    a, b = outline_box(old, mirror), outline_box(new, mirror)
+    return panel_rect((min(a[0], b[0]), min(a[1], b[1]), max(a[2], b[2]), max(a[3], b[3])),
+        size)
 
 
 def summary_lines(labels, names, changed, old, new):
@@ -276,6 +287,8 @@ def compare(old_file, new_file, labels, out, all_layers, work, remember=None):
         + [partial(version_masks, old, new, name) for name in unsettled])
     bodies = {False: results[0], True: results[1]}
     masks = dict(zip(unsettled, results[2:]))
+    rects = dict((mirror, page_rect(old, new, mirror, bodies[mirror].size))
+        for mirror in (False, True))
     changed = [name for name in unsettled if name not in same
         and ImageChops.difference(*masks[name]).getbbox()]
 
@@ -284,11 +297,12 @@ def compare(old_file, new_file, labels, out, all_layers, work, remember=None):
         mirror = name.startswith("B.")
         if name in changed or all_layers:
             jobs.append(partial(diff_page, name, masks[name][0], masks[name][1],
-                bodies[mirror]))
+                bodies[mirror], rects[mirror]))
         elif counterpart(name) in changed:
-            jobs.append(partial(placeholder_page, name, UNCHANGED_WORD, bodies[mirror].size))
+            jobs.append(partial(placeholder_page, name, UNCHANGED_WORD,
+                page_size(rects[mirror])))
     jobs.append(partial(text_page, SUMMARY_TITLE, summary_lines(labels, names, changed, old,
-        new), bodies[False].size))
+        new), page_size(rects[False])))
     write_pdf(parallel(jobs), out, DPI, DEFLATE_LEVEL)
     return changed
 
