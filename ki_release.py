@@ -16,12 +16,12 @@ import zipfile
 from datetime import datetime, timezone
 from functools import partial
 
-from ki_common_lib import (die, exit_with, help_formatter, kicad_cli, open_path, parallel, run,
-    shown, version_key)
+from ki_common_lib import (die, exit_with, form_end, help_formatter, kicad_cli, note, open_path,
+    parallel, run, shown, version_key)
 from ki_diff import compare as compare_boards
-from ki_image_lib import (CUT_LAYER, DPI, LABEL_COLOR, PAGE, Image, Plotter, board_scale,
-    caption, counterpart, default_drill, placeholder_page, require_imaging, sharp, sided_order,
-    solid, substrate, tint, write_pdf)
+from ki_image_lib import (CUT_LAYER, DPI, LABEL_COLOR, PAGE, Image, Plotter, board_scale, numpy,
+    caption, counterpart, default_drill, placeholder_page, require_imaging, sharp,
+    sibling_project, sided_order, solid, substrate, tint, write_pdf)
 
 DESCRIPTION = "Build a KiCad board's release artifacts, and publish them as a GitHub draft."
 
@@ -33,8 +33,9 @@ Building
       if you had flipped the board over. Written into the release directory and opened.
 
   ki release --render
-      The four 3D renders only: each side straight down, and each side tilted under a
-      perspective projection so the connectors read. Written and opened.
+      The 3D renders only: both sides straight down in one image, laid out as the board
+      image is and at its scale, and each side tilted under a perspective projection so the
+      connectors read. Written and opened.
 
   ki release
       Everything: schematic, gerbers, layer plots, the board image, the renders, the STEP
@@ -154,10 +155,23 @@ CUT_INK = "#FF2020"
 CUT_FADE = 0.35
 
 RENDER_TILT_SIZE = (1600, 1200)
-RENDER_FLAT_LONG_SIDE = 1600
 TILT_ROTATION = "-30,0,25"  # X looks down at the board, Z spins it so two edges show
 TILT_ZOOM = 0.62  # KiCad has no fit-to-board for renders, and 1.0 crops under perspective
+
+# The straight-down renders are brought to the board image's scale by the outline. A render of
+# the board without its 3D models has a silhouette that is nothing but the outline; made at a
+# quarter of the size it gives the outline's size to a pixel, though not its position, which
+# shifts by a few pixels between sizes. When the real render's silhouette has that size,
+# nothing overhangs and the silhouette is the outline; otherwise the model-free render is made
+# again at full size. Rendering costs by the pixel, so nothing is rendered larger than needed:
+# KiCad fits the board to the view, filling about 96% of it at zoom 1, so the board image's
+# size over FLAT_ZOOM * FLAT_FIT leaves a little to scale down, and the zoom keeps a
+# twentieth of the view free on each side for parts that overhang the outline.
 FLAT_ZOOM = 0.9
+FLAT_FIT = 0.95
+FLAT_PROBE = 4  # the model-free render is made at this fraction of the size, as its divisor
+FLAT_TOLERANCE = 4  # pixels by which the silhouette may exceed the outline without overhang
+MODEL_FORM = re.compile(r"\(model\s")
 
 # Lines carrying a timestamp, which differ on every export and must not reach the fab hash.
 TIMESTAMP_LINES = ("%TF.CreationDate,", "G04 Created by", "; DRILL file",
@@ -347,25 +361,44 @@ def side_plots(stack, mirror):
     return [(name, mirror, default_drill(name)) for name in stack]
 
 
+def outline_box(plotter, mirror):
+    """The board outline's box in the pixels of a plot at the plotter's scale."""
+    box = sharp(plotter.raster(CUT_LAYER, mirror, default_drill(CUT_LAYER))).getbbox()
+    if not box:
+        die("the board outline plotted empty at scale %.4f, so the %s side cannot be cropped"
+            % (plotter.scale, "back" if mirror else "front"))
+    return box
+
+
+def crop_margin(box):
+    """The border kept around the outline, the same for the board image and the renders."""
+    return int(round((box[2] - box[0]) * CROP_MARGIN))
+
+
+def side_by_side(front, back):
+    """Two panels on the background, front on the left, a gutter between them."""
+    gutter = int(round(front.width * GUTTER))
+    canvas = Image.new("RGB", (front.width + gutter + back.width,
+        max(front.height, back.height)), BACKGROUND)
+    canvas.paste(front, (0, 0))
+    canvas.paste(back, (front.width + gutter, 0))
+    return canvas
+
+
 def side_image(plotter, stack, mirror):
     """One side of the board composited and cropped to its outline."""
     plotter.plot(side_plots(stack, mirror))
-    drawn, edge = [], None
+    drawn = []
     for name in stack:
         color, alpha = COLORS[name]
         drawn.append(tint(plotter.raster(name, mirror, default_drill(name)), color, alpha))
-        if name == "Edge.Cuts":
-            edge = drawn[-1]
 
     page = Image.new("RGBA", drawn[0].size, BACKGROUND)
     for layer in drawn:
         page = Image.alpha_composite(page, layer)
 
-    box = sharp(edge.getchannel("A")).getbbox()
-    if not box:
-        die("the board outline plotted empty at scale %.4f, so the %s side cannot be cropped"
-            % (plotter.scale, "back" if mirror else "front"))
-    margin = int(round((box[2] - box[0]) * CROP_MARGIN))
+    box = outline_box(plotter, mirror)
+    margin = crop_margin(box)
     return page.crop((max(0, box[0] - margin), max(0, box[1] - margin),
         min(page.width, box[2] + margin), min(page.height, box[3] + margin))).convert("RGB")
 
@@ -374,55 +407,148 @@ def build_board_image(project, outdir, tag, plotter):
     """The deliverable image: front on the left, back mirrored on the right."""
     front, back = parallel([partial(side_image, plotter, FRONT_STACK, False),
         partial(side_image, plotter, BACK_STACK, True)])
-
-    gutter = int(round(front.width * GUTTER))
-    canvas = Image.new("RGB", (front.width + gutter + back.width,
-        max(front.height, back.height)), BACKGROUND)
-    canvas.paste(front, (0, 0))
-    canvas.paste(back, (front.width + gutter, 0))
     out = os.path.join(outdir, project.asset(tag, "board.png"))
-    canvas.save(out)
+    side_by_side(front, back).save(out)
     return out
 
 
-def render(pcb, out_png, side, tilted, aspect):
-    """One 3D view. Tilted views use a perspective projection so the connectors read."""
-    if tilted:
-        width, height = RENDER_TILT_SIZE
-        zoom = TILT_ZOOM
-    else:
-        long_side = RENDER_FLAT_LONG_SIDE
-        if aspect >= 1.0:
-            width, height = long_side, int(round(long_side / aspect))
-        else:
-            width, height = int(round(long_side * aspect)), long_side
-        zoom = FLAT_ZOOM
+def render(pcb, out_png, side, size, zoom, background, rotation=None):
+    """One 3D view, orthographic unless rotated, which also takes a perspective projection."""
     # Quality stays at basic, and there is no --floor: both turn on the raytracer, whose
     # shadows fall across the board and read as features that are not there.
     command = [kicad_cli(), "pcb", "render", "-o", out_png, "--side", side,
-        "--zoom", "%.2f" % zoom, "--width", str(width), "--height", str(height),
-        "--quality", "basic", "--background", "opaque"]
-    if tilted:
-        # The Z sign flips on the back, so the two tilts mirror instead of repeating.
-        rotation = TILT_ROTATION
-        if side == "bottom":
-            x, y, z = rotation.split(",")
-            rotation = "%s,%s,%s" % (x, y, -float(z))
+        "--zoom", "%.2f" % zoom, "--width", str(size[0]), "--height", str(size[1]),
+        "--quality", "basic", "--background", background]
+    if rotation:
         command += ["--perspective", "--rotate", rotation]
-    command.append(pcb)
-    run(command)
+    run(command + [pcb])
 
 
-def build_renders(project, outdir, tag, aspect):
-    made, jobs = [], []
-    for side in ("top", "bottom"):
-        for tilted in (False, True):
-            suffix = "3d-%s%s.png" % (side, "-tilt" if tilted else "")
-            out = os.path.join(outdir, project.asset(tag, suffix))
-            made.append(out)
-            jobs.append(partial(render, project.pcb, out, side, tilted, aspect))
-    parallel(jobs)
-    return made
+def render_tilted(pcb, out_png, side):
+    """A side under a perspective projection, so the connectors read."""
+    # The Z sign flips on the back, so the two tilts mirror instead of repeating.
+    x, y, z = TILT_ROTATION.split(",")
+    rotation = TILT_ROTATION if side == "top" else "%s,%s,%s" % (x, y, -float(z))
+    render(pcb, out_png, side, RENDER_TILT_SIZE, TILT_ZOOM, "opaque", rotation)
+    return out_png
+
+
+def without_models(pcb, directory):
+    """A copy of the board with every 3D model taken out of its footprints."""
+    text = open(pcb, encoding="utf-8", errors="replace", newline="").read()
+    pieces, last = [], 0
+    for match in MODEL_FORM.finditer(text):
+        if match.start() < last:
+            continue
+        pieces.append(text[last:match.start()])
+        last = form_end(text, match.start())
+    pieces.append(text[last:])
+    os.makedirs(directory, exist_ok=True)
+    path = os.path.join(directory, os.path.basename(pcb))
+    with open(path, "w", encoding="utf-8", newline="") as handle:
+        handle.write("".join(pieces))
+    project = sibling_project(pcb)
+    if project:
+        shutil.copyfile(project, os.path.splitext(path)[0] + ".kicad_pro")
+    return path
+
+
+def solid_box(image):
+    """The box of what a render drew, on its transparent background."""
+    return image.getchannel("A").point(lambda value: 255 if value > 128 else 0).getbbox()
+
+
+def coverage_box(image, factor=1):
+    """The box of what a render drew, to a fraction of a pixel, times the factor, or None.
+    The renderer antialiases, so an edge pixel's opacity says how much of it is covered."""
+    alpha = numpy.asarray(image.getchannel("A"), dtype=float) / 255.0
+
+    def span(profile):
+        covered = numpy.nonzero(profile > 0)[0]
+        if not len(covered):
+            return None
+        first, last = covered[0], covered[-1]
+        return (first + 1.0 - profile[first]) * factor, (last + profile[last]) * factor
+
+    across, down = span(alpha.max(axis=0)), span(alpha.max(axis=1))
+    if across is None:
+        return None
+    return across[0], down[0], across[1], down[1]
+
+
+def flat_view(project, bare, side, box, work):
+    """One side straight down, scaled so its outline matches the box, the outline's box in
+    the plot; returns the scaled render and where the outline's corner sits in it. The board
+    itself is rendered in place, since its 3D models may be found relative to it."""
+    probe = (int((box[2] - box[0]) / (FLAT_ZOOM * FLAT_FIT * FLAT_PROBE)) + 1,
+        int((box[3] - box[1]) / (FLAT_ZOOM * FLAT_FIT * FLAT_PROBE)) + 1)
+    size = (probe[0] * FLAT_PROBE, probe[1] * FLAT_PROBE)
+    full_png = os.path.join(work, "flat-%s.png" % side)
+    bare_png = os.path.join(work, "flat-%s-bare.png" % side)
+    parallel([partial(render, project.pcb, full_png, side, size, FLAT_ZOOM, "transparent"),
+        partial(render, bare, bare_png, side, probe, FLAT_ZOOM, "transparent")])
+    full = Image.open(full_png).convert("RGBA")
+    guess = coverage_box(Image.open(bare_png).convert("RGBA"), FLAT_PROBE)
+    drawn = coverage_box(full)
+    if not guess or not drawn:
+        die("the %s render of the board came out empty" % side)
+    if (drawn[2] - drawn[0] - (guess[2] - guess[0]) <= FLAT_TOLERANCE
+            and drawn[3] - drawn[1] - (guess[3] - guess[1]) <= FLAT_TOLERANCE):
+        outline = drawn
+    else:
+        render(bare, bare_png, side, size, FLAT_ZOOM, "transparent")
+        outline = coverage_box(Image.open(bare_png).convert("RGBA"))
+    if drawn[0] < 1 or drawn[1] < 1 or drawn[2] > full.width - 1 or drawn[3] > full.height - 1:
+        note("a part overhangs the %s view's edge, and is cut off in the render" % side)
+    scale_x = (box[2] - box[0]) / (outline[2] - outline[0])
+    scale_y = (box[3] - box[1]) / (outline[3] - outline[1])
+    scaled = full.resize((int(round(full.width * scale_x)), int(round(full.height * scale_y))),
+        Image.LANCZOS)
+    return scaled, (int(round(outline[0] * scale_x)), int(round(outline[1] * scale_y)))
+
+
+def build_flat_renders(project, outdir, tag, plotter, work):
+    """Both sides straight down, in one image laid out as the board image is: at its scale,
+    with its margin around the outline and its gutter, the back seen through the board. The
+    panels grow only where a part overhangs the outline further than the margin reaches."""
+    directory = os.path.join(work, "flat")
+    bare = without_models(project.pcb, os.path.join(directory, "bare"))
+    boxes = [outline_box(plotter, False), outline_box(plotter, True)]
+    views = parallel(partial(flat_view, project, bare, side, box, directory)
+        for side, box in zip(("top", "bottom"), boxes))
+
+    # How far each render reaches past its outline, never less than the board image's
+    # margin; top and bottom are shared, so the two outlines stay level.
+    reach = []
+    for (image, origin), box in zip(views, boxes):
+        width, height = box[2] - box[0], box[3] - box[1]
+        drawn = solid_box(image) or (origin[0], origin[1], origin[0] + width,
+            origin[1] + height)
+        margin = crop_margin(box)
+        reach.append([max(margin, origin[0] - drawn[0]), max(margin, origin[1] - drawn[1]),
+            max(margin, drawn[2] - origin[0] - width), max(margin, drawn[3] - origin[1] - height)])
+    top = max(reach[0][1], reach[1][1])
+    bottom = max(reach[0][3], reach[1][3])
+
+    panels = []
+    for (image, origin), box, (left, _top, right, _bottom) in zip(views, boxes, reach):
+        width, height = box[2] - box[0], box[3] - box[1]
+        # Cropping past the render's edge fills with transparency, as wanted here.
+        view = image.crop((origin[0] - left, origin[1] - top, origin[0] + width + right,
+            origin[1] + height + bottom))
+        panel = Image.alpha_composite(Image.new("RGBA", view.size, BACKGROUND), view)
+        panels.append(panel.convert("RGB"))
+    out = os.path.join(outdir, project.asset(tag, "3d.png"))
+    side_by_side(*panels).save(out)
+    return out
+
+
+def build_renders(project, outdir, tag, plotter, work):
+    """The two straight-down views in one image, and the two tilted ones."""
+    return parallel([partial(build_flat_renders, project, outdir, tag, plotter, work)]
+        + [partial(render_tilted, project.pcb,
+            os.path.join(outdir, project.asset(tag, "3d-%s-tilt.png" % side)), side)
+        for side in ("top", "bottom")])
 
 
 def build_gerbers(project, outdir, tag, work):
@@ -701,6 +827,8 @@ def release_notes(project, tag, record, owner):
             name = project.asset(tag, "3d-%s-tilt.png" % side)
             lines.append("![%s](%s/%s)" % (side, base, name))
         lines.append("")
+        lines.append("![3d](%s/%s)" % (base, project.asset(tag, "3d.png")))
+        lines.append("")
         lines.append("![board](%s/%s)" % (base, project.asset(tag, "board.png")))
         lines.append("")
         if record.get("diff_from"):
@@ -726,18 +854,18 @@ def do_build(project, tag, what):
     work = tempfile.mkdtemp(prefix="ki-release-")
     try:
         print("\nBuilding %s" % shown(outdir))
-        scale, aspect = board_scale(project.pcb, work)
+        scale, _aspect = board_scale(project.pcb, work)
         plotter = Plotter(project.pcb, work, scale)
         if what == "png":
             made = [build_board_image(project, outdir, tag, plotter)]
         elif what == "render":
-            made = build_renders(project, outdir, tag, aspect)
+            made = build_renders(project, outdir, tag, plotter, work)
         else:
             # Every stage at once. The STEP export is the longest single step, and the
             # artwork chain the longest run of Python; everything else hides behind them.
             jobs = [partial(build_gerbers, project, outdir, tag, work),
                 partial(build_artwork, project, outdir, tag, plotter),
-                partial(build_renders, project, outdir, tag, aspect),
+                partial(build_renders, project, outdir, tag, plotter, work),
                 partial(kicad_export, project, outdir, tag, "model.step",
                     ["pcb", "export", "step", "--no-dnp"], project.pcb),
                 partial(kicad_export, project, outdir, tag, "pos.csv",

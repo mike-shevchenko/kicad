@@ -138,20 +138,22 @@ class Plotter:
         self.made = {}
         self.rasters = {}
         self.lock = threading.Lock()
+        self.plotting = threading.Lock()
 
     def plot(self, wanted):
         """Make every requested plot not made yet, the runs side by side.
 
-        Not locked: a tool requests everything it will need in one call before any thread
-        asks for a plot, so later calls only read what is already made.
+        Locked, so that a thread asking for a plot while another's runs are under way
+        waits for them rather than plotting the same layers into the same files.
         """
-        groups = {}
-        for name, mirror, drill in wanted:
-            if (name, mirror, drill) not in self.made:
-                groups.setdefault((mirror, drill), []).append(name)
-        for made in parallel(partial(self.batch, names, mirror, drill)
-                for (mirror, drill), names in sorted(groups.items())):
-            self.made.update(made)
+        with self.plotting:
+            groups = {}
+            for name, mirror, drill in wanted:
+                if (name, mirror, drill) not in self.made:
+                    groups.setdefault((mirror, drill), []).append(name)
+            for made in parallel(partial(self.batch, names, mirror, drill)
+                    for (mirror, drill), names in sorted(groups.items())):
+                self.made.update(made)
 
     def one(self, name, mirror, drill):
         """The PDF of one plot, made now if it was not requested before."""
