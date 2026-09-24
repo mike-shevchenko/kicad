@@ -70,9 +70,12 @@ Publishing
   not hold the board its files show, and the source archive GitHub attaches to the release,
   the project as the tag has it, would not match them. Commit, rebuild, then publish.
 
-  The release body is generated from the git log since the previous release, and can be
-  edited on the page. It links the images by their eventual download URL, so they appear
-  once the release is published and show as missing while it is still a draft.
+  The build writes the release text into notes.md beside the files, from the git log since
+  the previous release, so it can be reviewed and edited with them; --publish uploads it as
+  it finds it, and it can be edited on the page afterwards too. It links the images by their
+  eventual download URL, so they appear once the release is published and show as missing
+  while it is still a draft, and in a local preview. The repository in those links comes from
+  the origin remote; when that is not on GitHub they read OWNER/REPO, and the build warns.
 
 Versions
 
@@ -198,6 +201,11 @@ fabrication output may no longer change, because boards carrying it exist.
 """
 
 REVISION = re.compile(r'\(rev\s+"([^"]*)"\)')
+
+NOTES_FILE = "notes.md"
+REPO_PLACEHOLDER = "OWNER/REPO"
+# The owner/name of a GitHub remote, in its ssh, scp-like or https form.
+GITHUB_REMOTE = re.compile(r"github\.com[:/]([^/]+)/([^/]+?)(?:\.git)?/?$")
 
 # A release tag of any revision, V1-r3 or V2-r1; the diff compares against the newest one.
 RELEASE_TAG = re.compile(r"^\S+-r\d+$")
@@ -793,7 +801,9 @@ def write_build_json(project, outdir, tag, digest, scale, files, diff_from):
 
 
 def report(project, tag, digest=None):
-    """The status block: where the revision stands and what the next release would be."""
+    """The status block: where the revision stands and what the next release would be.
+    Returns whether the fabrication output changed since the previous release of this
+    revision, or None when there is none to compare with."""
     print("Project: %s" % project.name)
     print("Revision: %s" % project.revision)
     tags = published_tags(project.revision)
@@ -805,8 +815,11 @@ def report(project, tag, digest=None):
         print("Previous release: none for %s" % project.revision)
     against = previous_release()
     print("Diff: against %s" % against if against else "Diff: none, nothing released before")
+    changed = None
     if digest is not None and previous:
         was = fab_hash_of_tag(project, previous)
+        if was is not None:
+            changed = was != digest
         if was is None:
             print("Fab output: cannot compare, %s has no board in it" % previous)
         elif was == digest:
@@ -828,6 +841,7 @@ def report(project, tag, digest=None):
         print("Warning: %d uncommitted file(s), so the artifacts match no commit, and"
             " --publish will refuse them" % len(modified))
     print("Next tag: %s" % tag)
+    return changed
 
 
 def do_produced(project, fab, quantity):
@@ -868,36 +882,41 @@ def do_produced(project, fab, quantity):
         print("Builds will refuse until the revision is bumped in board and schematic.")
 
 
-def release_notes(project, tag, record, owner):
+def github_repo():
+    """The owner/name of the origin remote when it is on GitHub, or None."""
+    url = git("remote", "get-url", "origin", check=False) or ""
+    match = GITHUB_REMOTE.search(url)
+    return "%s/%s" % match.groups() if match else None
+
+
+def release_notes(project, tag, record, repo, fab_changed):
     """A body generated from the log, with the renders linked by their eventual URL."""
     tags = published_tags(project.revision)
     previous = tags[-1] if tags else None
     span = "%s..HEAD" % previous if previous else "HEAD"
     log = git("log", "--no-merges", "--pretty=format:- %s", span, check=False) or ""
     lines = ["Board revision `%s`." % project.revision]
-    if previous:
+    if previous and fab_changed is not None:
         lines.append("Fabrication output %s since %s."
-            % ("unchanged" if record["fab_hash"] == fab_hash_of_tag(project, previous)
-                else "changed", previous))
+            % ("changed" if fab_changed else "unchanged", previous))
     lines.append("")
-    if owner:
-        base = "https://github.com/%s/releases/download/%s" % (owner, tag)
-        lines.append("![tilted](%s/%s)" % (base, project.asset(tag, "3d-tilt.png")))
+    base = "https://github.com/%s/releases/download/%s" % (repo, tag)
+    lines.append("![tilted](%s/%s)" % (base, project.asset(tag, "3d-tilt.png")))
+    lines.append("")
+    lines.append("![3d](%s/%s)" % (base, project.asset(tag, "3d.png")))
+    lines.append("")
+    lines.append("![board](%s/%s)" % (base, project.asset(tag, "board.png")))
+    lines.append("")
+    if record.get("diff_from"):
+        diff = project.asset(tag, "diff-from-%s.pdf" % record["diff_from"])
+        lines.append("The board compared with %s, layer by layer: [%s](%s/%s)"
+            % (record["diff_from"], diff, base, diff))
         lines.append("")
-        lines.append("![3d](%s/%s)" % (base, project.asset(tag, "3d.png")))
-        lines.append("")
-        lines.append("![board](%s/%s)" % (base, project.asset(tag, "board.png")))
-        lines.append("")
-        if record.get("diff_from"):
-            diff = project.asset(tag, "diff-from-%s.pdf" % record["diff_from"])
-            lines.append("The board compared with %s, layer by layer: [%s](%s/%s)"
-                % (record["diff_from"], diff, base, diff))
-            lines.append("")
-        # GitHub makes this archive of the tagged commit itself, once the release is published;
-        # publishing refuses uncommitted builds, so it holds the board the files above show.
-        lines.append("The KiCad project, to open in KiCad without git: [%s.zip]"
-            "(https://github.com/%s/archive/refs/tags/%s.zip)" % (tag, owner, tag))
-        lines.append("")
+    # GitHub makes this archive of the tagged commit itself, once the release is published;
+    # publishing refuses uncommitted builds, so it holds the board the files above show.
+    lines.append("The KiCad project, to open in KiCad without git: [%s.zip]"
+        "(https://github.com/%s/archive/refs/tags/%s.zip)" % (tag, repo, tag))
+    lines.append("")
     if log:
         lines.append("## Changes")
         lines.append("")
@@ -909,8 +928,21 @@ def release_dir(root, tag):
     return os.path.join(root, "release", tag)
 
 
-def do_build(project, tag, what):
-    """Build one of the three sets into the release directory, and return the files made."""
+def write_notes(project, outdir, tag, record, fab_changed):
+    """The release text, into notes.md beside the files it links."""
+    repo = github_repo()
+    if not repo:
+        print("Warning: the origin remote is not on GitHub, so %s links to %s; put the"
+            " repository there before publishing" % (NOTES_FILE, REPO_PLACEHOLDER))
+    path = os.path.join(outdir, NOTES_FILE)
+    with open(path, "w", encoding="utf-8", newline="\n") as handle:
+        handle.write(release_notes(project, tag, record, repo or REPO_PLACEHOLDER, fab_changed))
+    return path
+
+
+def do_build(project, tag, what, fab_changed=None):
+    """Build one of the three sets into the release directory, and return the files made.
+    fab_changed is the verdict of the status block, for the release text."""
     outdir = release_dir(project.root, tag)
     os.makedirs(outdir, exist_ok=True)
     work = tempfile.mkdtemp(prefix="ki-release-")
@@ -947,9 +979,9 @@ def do_build(project, tag, what):
             made = [zipped, image] + renders + results[5:] + [layers] + results[3:5]
             if diff:
                 made.append(diff)
-            path, _record = write_build_json(project, outdir, tag, digest, scale, made,
+            path, record = write_build_json(project, outdir, tag, digest, scale, made,
                 previous if diff else None)
-            made.append(path)
+            made += [path, write_notes(project, outdir, tag, record, fab_changed)]
         for path in sorted(made):
             print("  %s  %d bytes" % (os.path.basename(path), os.path.getsize(path)))
         return made, outdir
@@ -994,21 +1026,22 @@ def do_publish(project):
         die("%s is already published on GitHub, and this build would replace it.\n"
             "          Run git fetch --tags, then rebuild to get the next serial." % tag)
 
-    owner = subprocess.run(["gh", "repo", "view", "--json", "nameWithOwner", "-q",
-        ".nameWithOwner"], stdout=subprocess.PIPE, universal_newlines=True)
-    owner = owner.stdout.strip() if owner.returncode == 0 else ""
-    notes = release_notes(project, tag, record, owner)
-    notes_file = os.path.join(outdir, "notes.md")
-    with open(notes_file, "w", encoding="utf-8", newline="\n") as handle:
-        handle.write(notes)
+    # The release text is taken as the build left it, or as it was edited since.
+    notes_file = os.path.join(outdir, NOTES_FILE)
+    if os.path.isfile(notes_file):
+        notes = ["--notes-file", notes_file]
+    else:
+        print("Warning: no %s in %s - ki release writes it with the build. Publishing without"
+            " a release text." % (NOTES_FILE, shown(outdir)))
+        notes = None
 
     title = "%s %s" % (project.name, tag)
     target = ["--target", record["commit"]] if record["commit"] else []
     origin = (record["commit"] or "?")[:8]
     if standing:
         print("Refreshing the %s draft, from commit %s." % (tag, origin))
-        run(["gh", "release", "edit", tag, "--draft", "--title", title,
-            "--notes-file", notes_file] + target)
+        run(["gh", "release", "edit", tag, "--draft", "--title", title] + (notes or [])
+            + target)
         # Assets the build no longer produces would otherwise linger from the older draft.
         wanted = set(os.path.basename(path) for path in files)
         for asset in standing["assets"]:
@@ -1018,8 +1051,8 @@ def do_publish(project):
         url = standing["url"]
     else:
         print("Publishing %s as a draft, from commit %s." % (tag, origin))
-        output = run(["gh", "release", "create", tag, "--draft", "--title", title,
-            "--notes-file", notes_file] + target + files)
+        output = run(["gh", "release", "create", tag, "--draft", "--title", title]
+            + (notes or ["--notes", ""]) + target + files)
         lines = [line.strip() for line in output.splitlines() if line.strip()]
         url = lines[-1] if lines else ""
     # The draft's page has no Publish button, only its edit page does, one path segment away.
@@ -1084,14 +1117,14 @@ def main():
     try:
         staging = os.path.join(work, "fab")
         export_fab(project.pcb, staging)
-        report(project, tag, fab_hash(staging))
+        fab_changed = report(project, tag, fab_hash(staging))
     finally:
         shutil.rmtree(work, ignore_errors=True)
     if args.check:
         print("\nNothing written.")
         return 0
 
-    made, outdir = do_build(project, tag, "all")
+    made, outdir = do_build(project, tag, "all", fab_changed)
     print("\n%d files. Nothing published - review them, then run ki release --publish."
         % len(made))
     return 0
