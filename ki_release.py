@@ -17,7 +17,8 @@ from datetime import datetime, timezone
 from functools import partial
 
 from ki_common_lib import (die, exit_with, help_formatter, kicad_cli, open_path, parallel, run,
-    shown)
+    shown, version_key)
+from ki_diff import compare as compare_boards
 from ki_image_lib import (CUT_LAYER, DPI, LABEL_COLOR, PAGE, Image, Plotter, board_scale,
     caption, counterpart, default_drill, placeholder_page, require_imaging, sharp, sided_order,
     solid, substrate, tint, write_pdf)
@@ -37,7 +38,8 @@ Building
 
   ki release
       Everything: schematic, gerbers, layer plots, the board image, the renders, the STEP
-      model, the bill of materials and the placement file. Publishes nothing.
+      model, the bill of materials, the placement file, and the board compared with the
+      previous release's layer by layer, as ki diff draws it. Publishes nothing.
 
   ki release --check
       Report what a build would produce and stop. No files are written.
@@ -170,6 +172,9 @@ fabrication output may no longer change, because boards carrying it exist.
 """
 
 REVISION = re.compile(r'\(rev\s+"([^"]*)"\)')
+
+# A release tag of any revision, V1-r3 or V2-r1; the diff compares against the newest one.
+RELEASE_TAG = re.compile(r"^\S+-r\d+$")
 PRODUCED = re.compile(r"^\s*(?:[-*]\s+)?(\S+)\s+produced\b", re.MULTILINE)
 
 
@@ -261,6 +266,19 @@ def published_tags(revision):
     return [tag for _serial, tag in numbered]
 
 
+def previous_release():
+    """The newest published release of any revision, so that the first release of V2
+    compares with the last of V1. Ordered by the date of what it tags, then by serial."""
+    output = git("for-each-ref", "--format=%(creatordate:unix) %(refname:short)",
+        "refs/tags", check=False) or ""
+    found = []
+    for line in output.splitlines():
+        stamp, _space, tag = line.partition(" ")
+        if RELEASE_TAG.match(tag):
+            found.append((int(stamp), version_key(tag), tag))
+    return max(found)[2] if found else None
+
+
 def next_tag(revision):
     tags = published_tags(revision)
     serial = int(tags[-1].rsplit("-r", 1)[1]) + 1 if tags else 1
@@ -292,19 +310,29 @@ def fab_hash(directory):
     return digest.hexdigest()
 
 
-def fab_hash_of_tag(project, tag):
-    """The same hash, recomputed from the board as that tag left it."""
+def board_at_tag(project, tag, directory):
+    """The board as that tag left it, written into the directory, or None when the tag has
+    no board under this name."""
     relative = git("ls-files", "--full-name", project.pcb, check=False)
     if not relative:
         return None
     blob = git("show", "%s:%s" % (tag, relative), check=False)
     if blob is None:
         return None
+    os.makedirs(directory, exist_ok=True)
+    path = os.path.join(directory, os.path.basename(project.pcb))
+    with open(path, "w", encoding="utf-8", newline="") as handle:
+        handle.write(blob)
+    return path
+
+
+def fab_hash_of_tag(project, tag):
+    """The same hash, recomputed from the board as that tag left it."""
     work = tempfile.mkdtemp(prefix="ki-release-")
     try:
-        old = os.path.join(work, os.path.basename(project.pcb))
-        with open(old, "w", encoding="utf-8", newline="") as handle:
-            handle.write(blob)
+        old = board_at_tag(project, tag, work)
+        if old is None:
+            return None
         out = os.path.join(work, "fab")
         export_fab(old, out)
         return fab_hash(out)
@@ -411,6 +439,23 @@ def kicad_export(project, outdir, tag, suffix, arguments, source):
     """One kicad-cli export straight into the release directory."""
     out = os.path.join(outdir, project.asset(tag, suffix))
     run([kicad_cli()] + arguments + ["-o", out, source])
+    return out
+
+
+def build_diff(project, outdir, tag, work, previous):
+    """The board compared with the previous release's, as ki diff draws it, or None when
+    that release has no board under this name."""
+    directory = os.path.join(work, "diff")
+    old = board_at_tag(project, previous, os.path.join(directory, "previous"))
+    if old is None:
+        print("  no board of this name in %s, so no diff against it" % previous)
+        return None
+    commit, modified = head_state()
+    was = git("rev-parse", previous + "^{commit}", check=False) or "?"
+    labels = ("%s, from %s" % (previous, was[:8]), "%s, this release, from %s%s"
+        % (tag, (commit or "?")[:8], " with uncommitted changes" if modified else ""))
+    out = os.path.join(outdir, project.asset(tag, "diff-from-%s.pdf" % previous))
+    compare_boards(old, project.pcb, labels, out, False, directory)
     return out
 
 
@@ -534,10 +579,11 @@ def head_state():
     return commit, modified
 
 
-def write_build_json(project, outdir, tag, digest, scale, files):
+def write_build_json(project, outdir, tag, digest, scale, files, diff_from):
     commit, modified = head_state()
     record = {"project": project.name,
         "tag": tag,
+        "diff_from": diff_from,
         "revision": project.revision,
         "commit": commit,
         "dirty": bool(modified),
@@ -568,6 +614,8 @@ def report(project, tag, digest=None):
         print("Previous release: %s" % previous)
     else:
         print("Previous release: none for %s" % project.revision)
+    against = previous_release()
+    print("Diff: against %s" % against if against else "Diff: none, nothing released before")
     if digest is not None and previous:
         was = fab_hash_of_tag(project, previous)
         if was is None:
@@ -653,6 +701,11 @@ def release_notes(project, tag, record, owner):
         lines.append("")
         lines.append("![board](%s/%s)" % (base, project.asset(tag, "board.png")))
         lines.append("")
+        if record.get("diff_from"):
+            diff = project.asset(tag, "diff-from-%s.pdf" % record["diff_from"])
+            lines.append("The board compared with %s, layer by layer: [%s](%s/%s)"
+                % (record["diff_from"], diff, base, diff))
+            lines.append("")
     if log:
         lines.append("## Changes")
         lines.append("")
@@ -693,10 +746,17 @@ def do_build(project, tag, what):
                         ["sch", "export", "pdf"], project.sch),
                     partial(kicad_export, project, outdir, tag, "bom.csv",
                         ["sch", "export", "bom"], project.sch)]
+            previous = previous_release()
+            if previous:
+                jobs.append(partial(build_diff, project, outdir, tag, work, previous))
             results = parallel(jobs)
+            diff = results.pop() if previous else None
             (zipped, digest), (image, layers), renders = results[:3]
             made = [zipped, image] + renders + results[5:] + [layers] + results[3:5]
-            path, _record = write_build_json(project, outdir, tag, digest, scale, made)
+            if diff:
+                made.append(diff)
+            path, _record = write_build_json(project, outdir, tag, digest, scale, made,
+                previous if diff else None)
             made.append(path)
         for path in sorted(made):
             print("  %s  %d bytes" % (os.path.basename(path), os.path.getsize(path)))
