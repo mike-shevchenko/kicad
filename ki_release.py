@@ -33,9 +33,9 @@ Building
       if you had flipped the board over. Written into the release directory and opened.
 
   ki release --render
-      The 3D renders only: both sides straight down in one image, laid out as the board
-      image is and at its scale, and each side tilted under a perspective projection so the
-      connectors read. Written and opened.
+      The 3D renders only, as two images: both sides straight down, laid out as the board
+      image is and at its scale, and both sides tilted under a perspective projection so the
+      connectors read, side by side and cropped to the board. Written and opened.
 
   ki release
       Everything: schematic, gerbers, layer plots, the board image, the renders, the STEP
@@ -154,9 +154,12 @@ OUTLINE_INK = "#909090"
 CUT_INK = "#FF2020"
 CUT_FADE = 0.35
 
-RENDER_TILT_SIZE = (1600, 1200)
+# KiCad has no fit-to-board under perspective, so the tilted views are zoomed out far enough
+# for any board to stay in view, rendered large, and cropped to what they drew. The board then
+# fills about 40% of the render, and comes out of the crop larger than a 1600 x 1200 render.
+RENDER_TILT_SIZE = (2400, 1800)
 TILT_ROTATION = "-30,0,25"  # X looks down at the board, Z spins it so two edges show
-TILT_ZOOM = 0.62  # KiCad has no fit-to-board for renders, and 1.0 crops under perspective
+TILT_ZOOM = 0.62
 
 # The straight-down renders are brought to the board image's scale by the outline. A render of
 # the board without its 3D models has a silhouette that is nothing but the outline; made at a
@@ -376,12 +379,13 @@ def crop_margin(box):
 
 
 def side_by_side(front, back):
-    """Two panels on the background, front on the left, a gutter between them."""
+    """Two panels on the background, front on the left, a gutter between them, the shorter
+    one centered vertically."""
     gutter = int(round(front.width * GUTTER))
-    canvas = Image.new("RGB", (front.width + gutter + back.width,
-        max(front.height, back.height)), BACKGROUND)
-    canvas.paste(front, (0, 0))
-    canvas.paste(back, (front.width + gutter, 0))
+    height = max(front.height, back.height)
+    canvas = Image.new("RGB", (front.width + gutter + back.width, height), BACKGROUND)
+    canvas.paste(front, (0, (height - front.height) // 2))
+    canvas.paste(back, (front.width + gutter, (height - back.height) // 2))
     return canvas
 
 
@@ -424,13 +428,24 @@ def render(pcb, out_png, side, size, zoom, background, rotation=None):
     run(command + [pcb])
 
 
-def render_tilted(pcb, out_png, side):
-    """A side under a perspective projection, so the connectors read."""
+def render_tilted(pcb, side, work):
+    """A side under a perspective projection, so the connectors read, cropped to what it drew
+    with the board image's margin, on the board image's background."""
     # The Z sign flips on the back, so the two tilts mirror instead of repeating.
     x, y, z = TILT_ROTATION.split(",")
     rotation = TILT_ROTATION if side == "top" else "%s,%s,%s" % (x, y, -float(z))
-    render(pcb, out_png, side, RENDER_TILT_SIZE, TILT_ZOOM, "opaque", rotation)
-    return out_png
+    rendered = os.path.join(work, "tilt-%s.png" % side)
+    render(pcb, rendered, side, RENDER_TILT_SIZE, TILT_ZOOM, "transparent", rotation)
+    image = Image.open(rendered).convert("RGBA")
+    box = solid_box(image)
+    if not box:
+        die("the tilted %s render of the board came out empty" % side)
+    if box[0] == 0 or box[1] == 0 or box[2] == image.width or box[3] == image.height:
+        note("the tilted %s view reaches the render's edge, and may be cut off" % side)
+    margin = crop_margin(box)
+    # Cropping past the render's edge fills with transparency, as wanted here.
+    view = image.crop((box[0] - margin, box[1] - margin, box[2] + margin, box[3] + margin))
+    return Image.alpha_composite(Image.new("RGBA", view.size, BACKGROUND), view).convert("RGB")
 
 
 def without_models(pcb, directory):
@@ -544,11 +559,13 @@ def build_flat_renders(project, outdir, tag, plotter, work):
 
 
 def build_renders(project, outdir, tag, plotter, work):
-    """The two straight-down views in one image, and the two tilted ones."""
-    return parallel([partial(build_flat_renders, project, outdir, tag, plotter, work)]
-        + [partial(render_tilted, project.pcb,
-            os.path.join(outdir, project.asset(tag, "3d-%s-tilt.png" % side)), side)
-        for side in ("top", "bottom")])
+    """The two straight-down views in one image, and the two tilted ones in another."""
+    flat, top, bottom = parallel([partial(build_flat_renders, project, outdir, tag, plotter,
+        work), partial(render_tilted, project.pcb, "top", work),
+        partial(render_tilted, project.pcb, "bottom", work)])
+    tilted = os.path.join(outdir, project.asset(tag, "3d-tilt.png"))
+    side_by_side(top, bottom).save(tilted)
+    return [flat, tilted]
 
 
 def build_gerbers(project, outdir, tag, work):
@@ -823,9 +840,7 @@ def release_notes(project, tag, record, owner):
     lines.append("")
     if owner:
         base = "https://github.com/%s/releases/download/%s" % (owner, tag)
-        for side in ("top", "bottom"):
-            name = project.asset(tag, "3d-%s-tilt.png" % side)
-            lines.append("![%s](%s/%s)" % (side, base, name))
+        lines.append("![tilted](%s/%s)" % (base, project.asset(tag, "3d-tilt.png")))
         lines.append("")
         lines.append("![3d](%s/%s)" % (base, project.asset(tag, "3d.png")))
         lines.append("")
