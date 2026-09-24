@@ -49,12 +49,14 @@ Publishing
   ki release --publish
       Take what is already in the release directory and upload it as a draft release. It
       builds nothing, so review the files first and publish the same bytes you reviewed.
-      Run it again after a rebuild and it refreshes that draft in place. The draft's URL
-      is the last thing it prints.
+      Run it again after a rebuild and it refreshes that draft in place. It ends by printing
+      the draft's page, to review it, and its edit page, to publish it.
 
-  A draft creates no git tag: GitHub creates it only when you press Publish on the release
-  page. So this command pushes nothing and can be undone by deleting the draft. Afterwards,
-  git fetch --tags brings the new tag down.
+  A draft creates no git tag: GitHub creates it only when the draft is published. The draft's
+  own page has no button for that; its edit page does, reached by the pencil icon on the
+  draft, with Publish release at the bottom. From the command line the same is
+  gh release edit TAG --draft=false. So this command pushes nothing and can be undone by
+  deleting the draft. Afterwards, git fetch --tags brings the new tag down.
 
   The release body is generated from the git log since the previous release, and can be
   edited on the page. It links the images by their eventual download URL, so they appear
@@ -826,10 +828,16 @@ def do_publish(project):
             "--notes-file", notes_file] + target + files)
         lines = [line.strip() for line in output.splitlines() if line.strip()]
         url = lines[-1] if lines else ""
-    print("Review it, then press Publish there to create the tag,")
-    print("and run git fetch --tags afterwards.")
+    # The draft's page has no Publish button, only its edit page does, one path segment away.
     if url:
-        print("\n%s" % url)
+        print("\nReview the draft at\n  %s" % url)
+        print("then publish it from its edit page, with Publish release at the bottom:")
+        print("  %s" % url.replace("/releases/tag/", "/releases/edit/"))
+    else:
+        print("\nReview the draft on the repository's releases page, then publish it from its")
+        print("edit page, the pencil icon, with Publish release at the bottom.")
+    print("Or run: gh release edit %s --draft=false" % tag)
+    print("GitHub creates the tag on publishing; run git fetch --tags afterwards.")
 
 
 def main():
