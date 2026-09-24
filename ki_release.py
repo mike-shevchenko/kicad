@@ -893,6 +893,11 @@ def release_notes(project, tag, record, owner):
             lines.append("The board compared with %s, layer by layer: [%s](%s/%s)"
                 % (record["diff_from"], diff, base, diff))
             lines.append("")
+        # GitHub makes this archive of the tagged commit itself, once the release is published;
+        # publishing refuses uncommitted builds, so it holds the board the files above show.
+        lines.append("The KiCad project, to open in KiCad without git: [%s.zip]"
+            "(https://github.com/%s/archive/refs/tags/%s.zip)" % (tag, owner, tag))
+        lines.append("")
     if log:
         lines.append("## Changes")
         lines.append("")
