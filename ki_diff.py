@@ -16,7 +16,7 @@ from functools import partial
 from ki_common_lib import die, exit_with, help_formatter, note, open_path, parallel, shown
 from ki_image_lib import (CUT_LAYER, DPI, PAGE, SUBSTRATE, Image, ImageChops, Plotter,
     board_scale, caption, counterpart, default_drill, dimmed, enclosed, placeholder_page,
-    require_imaging, sharp, sided_order, text_page, write_pdf)
+    require_imaging, sharp, sibling_project, sided_order, text_page, write_pdf)
 
 DESCRIPTION = "Compare two versions of a board, layer by layer, into a PDF."
 
@@ -149,17 +149,6 @@ def reject_schematic(*paths):
             die("only boards are compared, not schematics: %s" % shown(path))
 
 
-def stage(path, directory):
-    """A copy of the board under a proper name. git and Fork hand over temporary files
-    without one, and kicad-cli names its plots after the board it was given."""
-    if not os.path.isfile(path):
-        die("not a file: %s" % shown(path))
-    os.makedirs(directory, exist_ok=True)
-    target = os.path.join(directory, "board" + PCB_EXT)
-    shutil.copy2(path, target)
-    return target
-
-
 def version_plots(plotter):
     """Every plot one version contributes: its outline both ways, and each of its layers."""
     wanted = [(CUT_LAYER, mirror, drill) for mirror in (False, True) for drill in (2, 0)]
@@ -258,15 +247,19 @@ def summary_lines(labels, names, changed, old, new):
     return lines
 
 
-def compare(old_file, new_file, labels, out, all_layers, work):
-    """Write the PDF, and return the names of the layers that differ."""
-    old_pcb = stage(old_file, os.path.join(work, "old"))
-    new_pcb = stage(new_file, os.path.join(work, "new"))
-    scale, _aspect = board_scale(new_pcb, work, output_area())
-    # No antialiasing: with every pixel wholly one thing, the three colors meet edge to
-    # edge, and no fringe pixel has to be judged for or against a change.
-    old = Plotter(old_pcb, os.path.join(work, "old"), scale, antialias=False)
-    new = Plotter(new_pcb, os.path.join(work, "new"), scale, antialias=False)
+def compare(old_file, new_file, labels, out, all_layers, work, remember=None):
+    """Write the PDF, and return the names of the layers that differ.
+
+    remember names a directory in which the board's scale on its sheet is kept between runs.
+    """
+    scale, _aspect = board_scale(new_file, work, remember)
+    # Both versions get the new one's project file, if it has one: the old side usually
+    # comes from git without one, and text variables resolved on one side only would show
+    # as changes nobody made. No antialiasing: with every pixel wholly one thing, the three
+    # colors meet edge to edge, and no fringe pixel has to be judged for or against a change.
+    project = sibling_project(new_file)
+    old = Plotter(old_file, os.path.join(work, "old"), scale, antialias=False, project=project)
+    new = Plotter(new_file, os.path.join(work, "new"), scale, antialias=False, project=project)
     parallel([partial(old.plot, version_plots(old)), partial(new.plot, version_plots(new))])
 
     # The new version's layers in its own order, then any the old one had and it lost. A
@@ -303,7 +296,7 @@ def compare(old_file, new_file, labels, out, all_layers, work):
 def run_compare(old_file, new_file, labels, out, all_layers):
     work = tempfile.mkdtemp(prefix="ki-diff-")
     try:
-        return compare(old_file, new_file, labels, out, all_layers, work)
+        return compare(old_file, new_file, labels, out, all_layers, work, output_area())
     finally:
         shutil.rmtree(work, ignore_errors=True)
 

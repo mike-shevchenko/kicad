@@ -4,6 +4,7 @@
 import hashlib
 import os
 import re
+import shutil
 import textwrap
 import threading
 import zlib
@@ -86,20 +87,54 @@ def sided_order(names):
         + [name for name in names if counterpart(name) not in present])
 
 
+def sibling_project(pcb):
+    """The project file beside a board, or None."""
+    project = os.path.splitext(pcb)[0] + ".kicad_pro"
+    return project if os.path.isfile(project) else None
+
+
+def stage_board(pcb, directory, project):
+    """A copy of the board to plot from, with the project file beside it but nothing else.
+
+    kicad-cli reads the .kicad_prl next to a board, and a scaled plot is centered on what
+    the editor last showed: with a layer preset active that hides layers, the drawing lands
+    off the sheet and every plot comes out blank. The project file is copied for its text
+    variables and design settings. A name without the extension, as git and Fork hand over,
+    gets one, since kicad-cli decides what a file is by it.
+    """
+    if not os.path.isfile(pcb):
+        die("not a file: %s" % shown(pcb))
+    os.makedirs(directory, exist_ok=True)
+    name = os.path.basename(pcb)
+    if not name.lower().endswith(".kicad_pcb"):
+        name += ".kicad_pcb"
+    target = os.path.join(directory, name)
+    shutil.copyfile(pcb, target)
+    if project:
+        shutil.copyfile(project, os.path.splitext(target)[0] + ".kicad_pro")
+    return target
+
+
 class Plotter:
     """Layer plots of one board at one scale, black on white, in as few runs as possible.
 
     A kicad-cli run costs about half a second to load the board and a few milliseconds
     per layer, so all plots sharing a mirror and drill setting come out of one run. A
     plot is requested as (name, mirror, drill), with the name as the board shows it.
+
+    The board is plotted from a copy in the work directory, with the project file named
+    by project, or by default the one beside the board.
     """
 
-    def __init__(self, pcb, work, scale, antialias=True):
-        self.pcb, self.work, self.scale, self.antialias = pcb, work, scale, antialias
-        self.layers = board_layers(pcb)
+    def __init__(self, pcb, work, scale, antialias=True, project="beside"):
+        if project == "beside":
+            project = sibling_project(pcb)
+        self.pcb = stage_board(pcb, os.path.join(work, "board"), project)
+        self.work, self.scale, self.antialias = work, scale, antialias
+        self.layers = board_layers(self.pcb)
         self.names = [name for _stored, name in self.layers]
         self.stored = dict((name, stored) for stored, name in self.layers)
-        self.stem = os.path.splitext(os.path.basename(pcb))[0]
+        self.stem = os.path.splitext(os.path.basename(self.pcb))[0]
         self.made = {}
         self.rasters = {}
         self.lock = threading.Lock()

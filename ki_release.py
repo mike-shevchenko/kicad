@@ -332,6 +332,9 @@ def side_image(plotter, stack, mirror):
         page = Image.alpha_composite(page, layer)
 
     box = sharp(edge.getchannel("A")).getbbox()
+    if not box:
+        die("the board outline plotted empty at scale %.4f, so the %s side cannot be cropped"
+            % (plotter.scale, "back" if mirror else "front"))
     margin = int(round((box[2] - box[0]) * CROP_MARGIN))
     return page.crop((max(0, box[0] - margin), max(0, box[1] - margin),
         min(page.width, box[2] + margin), min(page.height, box[3] + margin))).convert("RGB")
@@ -474,6 +477,9 @@ def build_layers_pdf(project, outdir, tag, plotter):
         partial(plotter.raster, name, name.startswith("B."), default_drill(name))
         for name in layers)))
     bare = dict((name, not masks[name].getbbox()) for name in layers)
+    if all(bare.values()):
+        die("every layer plotted empty at scale %.4f, which a board with an outline cannot do"
+            % plotter.scale)
 
     pages, jobs, dropped, placed = [], [], [], []
     for name in layers:
