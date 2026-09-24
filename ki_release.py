@@ -66,6 +66,10 @@ Publishing
   gh release edit TAG --draft=false. So this command pushes nothing and can be undone by
   deleting the draft. Afterwards, git fetch --tags brings the new tag down.
 
+  A build made from uncommitted changes is refused: the release would target a commit that does
+  not hold the board its files show, and the source archive GitHub attaches to the release,
+  the project as the tag has it, would not match them. Commit, rebuild, then publish.
+
   The release body is generated from the git log since the previous release, and can be
   edited on the page. It links the images by their eventual download URL, so they appear
   once the release is published and show as missing while it is still a draft.
@@ -821,8 +825,8 @@ def report(project, tag, digest=None):
             % project.revision)
     commit, modified = head_state()
     if modified:
-        print("Warning: %d uncommitted file(s), so the artifacts match no commit"
-            % len(modified))
+        print("Warning: %d uncommitted file(s), so the artifacts match no commit, and"
+            " --publish will refuse them" % len(modified))
     print("Next tag: %s" % tag)
 
 
@@ -875,8 +879,6 @@ def release_notes(project, tag, record, owner):
         lines.append("Fabrication output %s since %s."
             % ("unchanged" if record["fab_hash"] == fab_hash_of_tag(project, previous)
                 else "changed", previous))
-    if record["dirty"]:
-        lines.append("Built from uncommitted changes on top of `%s`." % record["commit"][:8])
     lines.append("")
     if owner:
         base = "https://github.com/%s/releases/download/%s" % (owner, tag)
@@ -964,6 +966,10 @@ def do_publish(project):
     tag = builds[-1]
     outdir = os.path.join(root, tag)
     record = json.load(open(os.path.join(outdir, "build.json"), encoding="utf-8"))
+    if record["dirty"]:
+        die("%s was built from uncommitted changes, so no commit holds the board its files"
+            " show:\n          %s\n          Commit them, rebuild, then publish."
+            % (tag, "\n          ".join(record["modified"])))
 
     files = []
     for entry in record["files"]:
