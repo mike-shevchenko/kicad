@@ -29,10 +29,19 @@ VERBS = (
     ("install", None, "write the ki wrapper into a directory on PATH"),
 )
 
+# Only an argument that is an absolute POSIX path to something that exists is converted for
+# Windows Python; cygpath on a text would turn its | * ? < > " into private-use characters, its
+# slashes into backslashes, and a leading / into the git-bash install directory.
 SHELL = """#!/bin/bash
-mapfile -t args < <(cygpath -w -- "$@" 2>/dev/null)
-set -- "${args[@]}"
-exec python "%s" "$@"
+args=()
+for arg in "$@"; do
+  if [[ "${arg}" == /* && -e "${arg}" ]]; then
+    args+=("$(cygpath -w -- "${arg}")")
+  else
+    args+=("${arg}")
+  fi
+done
+exec python "%s" "${args[@]}"
 """
 
 BATCH = '@python "%s" %%*\n'
@@ -48,8 +57,10 @@ Installing
   ki install DIRECTORY [--dry-run]
 
   Writes ki.cmd for cmd.exe, and for git and Fork, which launch it by name, and ki for
-  cygwin and git-bash, both holding the absolute path of this script. Any directory on
-  PATH will do. Re-run it after moving the scripts.
+  cygwin, git-bash and MSYS2, both holding the absolute path of this script. Any directory on
+  PATH will do. Re-run it after moving the scripts. The ki script converts an argument that
+  is an existing absolute POSIX path, such as /c/boards/x.kicad_pcb, for Windows Python, and
+  passes every other argument as typed.
 
   Any python on PATH will do. A tool needing KiCad's own interpreter re-runs itself under it.
 """
