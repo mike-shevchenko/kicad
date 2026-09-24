@@ -134,11 +134,11 @@ COLORS = {"Edge.Cuts": ("#D0D2CD", 1.0),
     "User.Eco2": ("#D8C852", 1.0),
     "Margin": ("#FF26E2", 1.0)}
 
-# Bottom to top, as the editor draws it with a copper layer selected: silkscreen underneath,
-# copper over it and semi-transparent, so a ground pour does not hide the labels it covers.
-# The mask has a color above but is left out of the stack, its pad openings only add rings.
-FRONT_STACK = ("F.Silkscreen", "F.Cu", "Edge.Cuts")
-BACK_STACK = ("B.Silkscreen", "B.Cu", "Edge.Cuts")
+# Bottom to top, as the editor draws it with a copper layer selected: the mask's openings
+# lowest, the silkscreen over them, and the copper on top and semi-transparent, so a ground
+# pour does not hide the labels it covers.
+FRONT_STACK = ("F.Mask", "F.Silkscreen", "F.Cu", "Edge.Cuts")
+BACK_STACK = ("B.Mask", "B.Silkscreen", "B.Cu", "Edge.Cuts")
 
 # What the fabricator receives. Pinned, so that Fab and Courtyard edits cannot register as
 # changes to the manufactured board.
