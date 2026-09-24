@@ -3,11 +3,11 @@
 # Written with the help of Claude Opus 5.
 # Run as "ki justify" through the ki launcher, or directly as "python ki_justify.py".
 
-import argparse
 import os
 import re
 
-from ki_common_lib import (default_board, die, ensure_kicad_python, exit_with, form_end,
+from ki_common_lib import (TextParser, default_board, die, ensure_kicad_python, exit_with,
+    form_end,
     help_formatter, shown)
 
 DESCRIPTION = "Rejustify a text or field, shifting it so its position on the board is kept."
@@ -29,6 +29,10 @@ Usage
       ki justify J2 left center       the same
       ki justify J2 bottom left       left and bottom
       ki justify J2 center center     centered both ways
+
+  A TEXT starting with a dash would be taken for an option, so put -- in front of it:
+
+      ki justify -- '-12|DE2' right center
 
   Two words for the same axis are refused. A justification of center on both axes with no
   mirroring is what KiCad expresses by leaving the form out, so this writes it out the same
@@ -251,7 +255,7 @@ def drop_line(body, start, end):
 
 
 def main():
-    parser = argparse.ArgumentParser(
+    parser = TextParser(
         prog="ki justify", description=DESCRIPTION, epilog=EPILOG,
         formatter_class=help_formatter)
     parser.add_argument("text", metavar="TEXT", help="exact contents of the text or field")

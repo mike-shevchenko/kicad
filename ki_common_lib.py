@@ -55,6 +55,23 @@ def help_formatter(prog):
     return argparse.RawDescriptionHelpFormatter(prog, width=99)
 
 
+class TextParser(argparse.ArgumentParser):
+    """A parser for a tool taking free text, which may start with a dash, as `-12V` does.
+    argparse takes such text for an option, and its complaint then names some other argument
+    as missing, so the error says what happened and how to pass the text."""
+
+    def error(self, message):
+        args = sys.argv[1:]
+        if "--" in args:
+            args = args[:args.index("--")]
+        strays = [arg for arg in args if arg.startswith("-") and len(arg) > 1
+            and arg.split("=")[0] not in self._option_string_actions]
+        if strays:
+            message += ("\n%r starts with a dash, so it was taken for an option. To pass it as"
+                " text, put `--` in front of it, after any options." % strays[0])
+        argparse.ArgumentParser.error(self, message)
+
+
 def shown(path):
     """Display form. Windows accepts forward slashes, and they survive cygwin and git-bash
     without escaping, so printed paths can be pasted straight back into a shell."""

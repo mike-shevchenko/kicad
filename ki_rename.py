@@ -3,7 +3,6 @@
 # Written with the help of Claude Opus 5.
 # Run as "ki rename" through the ki launcher, or directly as "python ki_rename.py".
 
-import argparse
 import ast
 import os
 import re
@@ -11,7 +10,7 @@ import shutil
 import sys
 from collections import Counter
 
-from ki_common_lib import exit_with, help_formatter
+from ki_common_lib import TextParser, exit_with, help_formatter
 
 DESCRIPTION = "Rename a string in every KiCad file of the current directory."
 
@@ -65,6 +64,11 @@ Examples
   ki rename J9 J1 -v
   ki rename J9 J1 -e 3 4 7
   ki rename J9 J1 -e 3 4 7 -f
+
+A SAMPLE or REPLACEMENT starting with a dash would be taken for an option, so put -- in front
+of them, after any options:
+
+  ki rename -e 3 -- '-12|DE2' '-12|DE3'
 """
 
 SUFFIXES = (".kicad_sch", ".kicad_pcb", ".kicad_mod", ".kicad_pro", ".kicad_prl",
@@ -195,7 +199,7 @@ def resolve_exclusions(items, path, order):
 
 
 def main():
-    ap = argparse.ArgumentParser(
+    ap = TextParser(
         prog="ki rename",
         description=DESCRIPTION, epilog=EPILOG,
         formatter_class=help_formatter)
