@@ -20,7 +20,7 @@ import argparse
 import re
 import uuid
 
-from ki_common_lib import exit_with, form_end, help_formatter
+from ki_common_lib import die, exit_with, form_end, help_formatter
 
 PIXEL = 0.15
 MARGIN = 1  # margin from the edges, in pixels
@@ -97,6 +97,8 @@ def main():
     text = open(src, encoding="utf-8").read()
 
     polys = parse_polys(text)
+    if not polys:
+        die("no fp_poly in %s, so there is nothing to cut the glyph from" % src)
     target = max(polys, key=lambda p: bbox_area(p["pts"]))
     ring = target["pts"]
     layer = target["layer"]

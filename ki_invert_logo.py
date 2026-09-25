@@ -17,7 +17,7 @@ import re
 import sys
 import uuid
 
-from ki_common_lib import exit_with, form_end, help_formatter
+from ki_common_lib import die, exit_with, form_end, help_formatter
 
 PIXEL = 0.15
 MARGIN = 1
@@ -106,6 +106,8 @@ def main():
 
     text = open(src, encoding="utf-8").read()
     polys = parse_polys(text)
+    if not polys:
+        die("no fp_poly in %s, so there is nothing to invert" % src)
     layer = polys[0][1]
 
     shapes = [Polygon(p).buffer(0) for p, _ in polys]

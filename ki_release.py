@@ -221,8 +221,11 @@ PRODUCED = re.compile(r"^\s*(?:[-*]\s+)?(\S+)\s+produced\b", re.MULTILINE)
 def git(*args, **kwargs):
     """Run git and return its output, or None when it fails and check is False."""
     check = kwargs.pop("check", True)
-    result = subprocess.run(("git",) + args, stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE, universal_newlines=True)
+    try:
+        result = subprocess.run(("git",) + args, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, universal_newlines=True)
+    except OSError as error:
+        die("git cannot be run: %s" % (error.strerror or error))
     if result.returncode:
         if check:
             die("git %s failed: %s" % (args[0], result.stderr.strip()))

@@ -42,12 +42,26 @@ def note(message):
 
 
 def exit_with(main):
-    """Every tool's entry point: run main, and report a Failure the way die() promises."""
+    """Every tool's entry point: run main, and report a Failure the way die() promises.
+
+    A file that cannot be read or written is reported the same way, in one line, since a
+    mistyped name is the commonest way for a tool to fail; a traceback would tell the user
+    nothing more than where in the tool it was noticed.
+    """
     try:
         sys.exit(main())
     except Failure as failure:
         sys.stderr.write("[ki] %s\n" % failure)
         sys.exit(failure.code)
+    except OSError as error:
+        what = error.strerror or str(error)
+        if error.filename:
+            what = "%s: %s" % (shown(str(error.filename)), what)
+        sys.stderr.write("[ki] %s\n" % what)
+        sys.exit(2)
+    except KeyboardInterrupt:
+        sys.stderr.write("[ki] interrupted\n")
+        sys.exit(130)
 
 
 def help_formatter(prog):
@@ -101,8 +115,11 @@ def parallel(jobs):
 def run(command, quiet=True):
     """Run a command, and fail loudly with its own output when it does."""
     with KICAD_LANES:
-        result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            universal_newlines=True)
+        try:
+            result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                universal_newlines=True)
+        except OSError as error:
+            die("%s cannot be run: %s" % (shown(command[0]), error.strerror or error))
     if result.returncode:
         sys.stderr.write(result.stdout or "")
         die("%s failed with status %d" % (os.path.basename(command[0]), result.returncode))
