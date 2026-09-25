@@ -206,7 +206,7 @@ def drills_differ(old, new, mirror):
     return not plots_equal(old.one(CUT_LAYER, mirror, 2), new.one(CUT_LAYER, mirror, 2))
 
 
-def body(new, old, mirror):
+def body(new, old, mirror, background=PAGE):
     """What every page has under its artwork: the new version's substrate with the holes of
     both versions punched, and a hole of one version only tinted toward its color, so the
     drills are compared on every page without a drawing of their own.
@@ -215,7 +215,7 @@ def body(new, old, mirror):
     and the page is RGB throughout, which is a quarter less memory to push around.
     """
     mask = body_mask(new, mirror)
-    under = Image.new("RGB", mask.size, PAGE)
+    under = Image.new("RGB", mask.size, background)
     if not drills_differ(old, new, mirror):
         under.paste(SUBSTRATE, mask=mask)
         return under
@@ -237,15 +237,26 @@ def outline_under(new, old, mirror):
     return under
 
 
-def diff_page(name, old, new, under, rect):
-    """One page: the body, the unchanged artwork faint, the old-only red, the new-only cyan.
-    On a Fab page the unchanged drawing is faint ink, as faint white would vanish on white."""
+def diff_drawing(name, old, new, under):
+    """The body, the unchanged artwork faint, the old-only red, the new-only cyan. On a Fab
+    page the unchanged drawing is faint ink, as faint white would vanish on white."""
     both = ImageChops.multiply(old, new)
     page = under.copy()
     page.paste(INK if name in OUTLINE_ONLY else SAME_COLOR, mask=dimmed(both, SAME_ALPHA))
     page.paste(OLD_COLOR, mask=ImageChops.subtract(old, both))
     page.paste(NEW_COLOR, mask=ImageChops.subtract(new, both))
-    return captioned(page.crop(rect), name)
+    return page
+
+
+def diff_page(name, old, new, under, rect):
+    """One page: the drawing cropped to the board, under the layer's name."""
+    return captioned(diff_drawing(name, old, new, under).crop(rect), name)
+
+
+def kept_drawing(name, old, new, under, rect):
+    """A layer's drawing cropped as a page is, but without the caption, for a caller that
+    sets it among images of its own."""
+    return diff_drawing(name, old, new, under).crop(rect)
 
 
 def page_rect(old, new, mirror, size):
@@ -270,8 +281,11 @@ def summary_lines(labels, names, changed, old, new):
     return lines
 
 
-def compare(old_file, new_file, labels, out, all_layers, work, remember=None):
-    """Write the PDF, and return the names of the layers that differ.
+def compare(old_file, new_file, labels, out, all_layers, work, remember=None, keep=(),
+        keep_background=None):
+    """Write the PDF, and return the names of the layers that differ, and the drawings of the
+    keep layers as images: as their pages, but without the caption, drawn whether those layers
+    changed or not, and on keep_background instead of the page's white when it is given.
 
     remember names a directory in which the board's scale on its sheet is kept between runs.
     """
@@ -290,17 +304,22 @@ def compare(old_file, new_file, labels, out, all_layers, work, remember=None):
     names = new.names + [name for name in old.names if name not in new.names]
     same = [name for name in names if name in old.stored and name in new.stored
         and plots_equal(old.one(*plot_key(name)), new.one(*plot_key(name)))]
-    unsettled = [name for name in names if name not in same]
+    unsettled = [name for name in names if name not in same or name in keep]
     if all_layers:
         unsettled = names
     # The bodies first in the batch, since they take longest: they label the regions of
     # the outline plot while the layers behind them are still being rasterized.
+    kept_bodies = []
+    if keep and keep_background:
+        kept_bodies = [partial(body, new, old, False, keep_background),
+            partial(body, new, old, True, keep_background)]
     results = parallel([partial(body, new, old, False), partial(body, new, old, True),
         partial(outline_under, new, old, False), partial(outline_under, new, old, True)]
-        + [partial(version_masks, old, new, name) for name in unsettled])
+        + kept_bodies + [partial(version_masks, old, new, name) for name in unsettled])
     bodies = {False: results[0], True: results[1]}
     outlines = {False: results[2], True: results[3]}
-    masks = dict(zip(unsettled, results[4:]))
+    kept_bodies = {False: results[4], True: results[5]} if kept_bodies else bodies
+    masks = dict(zip(unsettled, results[4 + (2 if keep_background else 0):]))
     rects = dict((mirror, page_rect(old, new, mirror, bodies[mirror].size))
         for mirror in (False, True))
     changed = [name for name in unsettled if name not in same
@@ -318,14 +337,24 @@ def compare(old_file, new_file, labels, out, all_layers, work, remember=None):
                 page_size(rects[mirror])))
     jobs.append(partial(text_page, SUMMARY_TITLE, summary_lines(labels, names, changed, old,
         new), page_size(rects[False])))
-    write_pdf(parallel(jobs), out, DPI, DEFLATE_LEVEL)
-    return changed
+    # The kept layers' drawings come last in the same batch, and go to the caller instead.
+    wanted = [name for name in keep if name in masks]
+    for name in wanted:
+        mirror = name.startswith("B.")
+        jobs.append(partial(kept_drawing, name, masks[name][0], masks[name][1],
+            kept_bodies[mirror], rects[mirror]))
+    results = parallel(jobs)
+    pages = results[:len(results) - len(wanted)]
+    write_pdf(pages, out, DPI, DEFLATE_LEVEL)
+    return changed, dict(zip(wanted, results[len(pages):]))
 
 
 def run_compare(old_file, new_file, labels, out, all_layers):
     work = tempfile.mkdtemp(prefix="ki-diff-")
     try:
-        return compare(old_file, new_file, labels, out, all_layers, work, output_area())
+        changed, _kept = compare(old_file, new_file, labels, out, all_layers, work,
+            output_area())
+        return changed
     finally:
         shutil.rmtree(work, ignore_errors=True)
 

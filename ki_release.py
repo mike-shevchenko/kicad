@@ -47,7 +47,8 @@ Building
   ki release
       Everything: schematic, gerbers, layer plots, the board image, the renders, the STEP
       model, the bill of materials, the placement file, and the board compared with the
-      previous release's layer by layer, as ki diff draws it. Publishes nothing.
+      previous release's layer by layer, as ki diff draws it, with the two silkscreen pages
+      of that comparison as images too, for the release page. Publishes nothing.
 
   ki release --check
       Report what a build would produce and stop. No files are written.
@@ -203,6 +204,11 @@ fabrication output may no longer change, because boards carrying it exist.
 REVISION = re.compile(r'\(rev\s+"([^"]*)"\)')
 
 NOTES_FILE = "notes.md"
+
+# Layers of the diff that the release notes show as images, both sides of each in one image
+# laid out as the board image is: the silkscreen, where a change on a typical board is seen
+# at a glance, and the copper. Each is an asset named after its layers.
+DIFF_IMAGES = (("silkscreen", ("F.Silkscreen", "B.Silkscreen")), ("copper", ("F.Cu", "B.Cu")))
 REPO_PLACEHOLDER = "OWNER/REPO"
 # The owner/name of a GitHub remote, in its ssh, scp-like or https form.
 GITHUB_REMOTE = re.compile(r"github\.com[:/]([^/]+)/([^/]+?)(?:\.git)?/?$")
@@ -426,7 +432,7 @@ def build_board_image(project, outdir, tag, plotter):
     """The deliverable image: front on the left, back mirrored on the right."""
     front, back = parallel([partial(side_image, plotter, FRONT_STACK, False),
         partial(side_image, plotter, BACK_STACK, True)])
-    out = os.path.join(outdir, project.asset(tag, "board.png"))
+    out = os.path.join(outdir, project.asset(tag, "pcb.png"))
     return save_png(side_by_side(front, back), out)
 
 
@@ -609,7 +615,7 @@ def build_tilted_renders(project, outdir, tag, plotter, work):
         Image.LANCZOS)
     canvas = Image.new("RGB", target, BACKGROUND)
     canvas.paste(image, ((target[0] - image.width) // 2, (target[1] - image.height) // 2))
-    out = os.path.join(outdir, project.asset(tag, "3d-tilt.png"))
+    out = os.path.join(outdir, project.asset(tag, "3d-tilted.png"))
     return save_png(canvas, out)
 
 
@@ -639,8 +645,9 @@ def kicad_export(project, outdir, tag, suffix, arguments, source):
 
 
 def build_diff(project, outdir, tag, work, previous):
-    """The board compared with the previous release's, as ki diff draws it, or None when
-    that release has no board under this name."""
+    """The board compared with the previous release's, as ki diff draws it: the PDF, then
+    the silkscreen and the copper as images; or None when that release has no board under
+    this name."""
     directory = os.path.join(work, "diff")
     old = board_at_tag(project, previous, os.path.join(directory, "previous"))
     if old is None:
@@ -651,8 +658,15 @@ def build_diff(project, outdir, tag, work, previous):
     labels = ("%s, from %s" % (previous, was[:8]), "%s, this release, from %s%s"
         % (tag, (commit or "?")[:8], " with uncommitted changes" if modified else ""))
     out = os.path.join(outdir, project.asset(tag, "diff-from-%s.pdf" % previous))
-    compare_boards(old, project.pcb, labels, out, False, directory)
-    return out
+    _changed, kept = compare_boards(old, project.pcb, labels, out, False, directory,
+        keep=[layer for _suffix, layers in DIFF_IMAGES for layer in layers],
+        keep_background=BACKGROUND)
+    made = [out]
+    for suffix, (front, back) in DIFF_IMAGES:
+        if front in kept and back in kept:
+            made.append(save_png(side_by_side(kept[front], kept[back]), os.path.join(outdir,
+                project.asset(tag, "diff-from-%s-%s.png" % (previous, suffix)))))
+    return made
 
 
 def build_artwork(project, outdir, tag, plotter):
@@ -893,34 +907,48 @@ def release_notes(project, tag, record, repo, fab_changed):
     """A body generated from the log, with the renders linked by their eventual URL."""
     tags = published_tags(project.revision)
     previous = tags[-1] if tags else None
-    span = "%s..HEAD" % previous if previous else "HEAD"
-    log = git("log", "--no-merges", "--pretty=format:- %s", span, check=False) or ""
-    lines = ["Board revision `%s`." % project.revision]
+    # The changes run from the release the diff compares with when this revision has none of
+    # its own yet, so that the first release of a revision still tells its story.
+    since = previous or record.get("diff_from")
+    log = git("log", "--no-merges", "--pretty=format:- %s", "%s..HEAD" % since if since
+        else "HEAD", check=False) or ""
+    lines = ["PCB revision %s." % project.revision, ""]
     if previous and fab_changed is not None:
-        lines.append("Fabrication output %s since %s."
-            % ("changed" if fab_changed else "unchanged", previous))
+        lines.append("Fabrication files changed since %s, see the difference below." % previous
+            if fab_changed else "Fabrication files identical to %s." % previous)
+        lines.append("")
+    # GitHub makes this archive of the tagged commit itself, once the release is published;
+    # publishing refuses uncommitted builds, so it holds the board the images show.
+    lines.append("KiCad project: [%s.zip](https://github.com/%s/archive/refs/tags/%s.zip)"
+        % (tag, repo, tag))
     lines.append("")
     base = "https://github.com/%s/releases/download/%s" % (repo, tag)
-    lines.append("![tilted](%s/%s)" % (base, project.asset(tag, "3d-tilt.png")))
+    lines.append("![tilted](%s/%s)" % (base, project.asset(tag, "3d-tilted.png")))
     lines.append("")
     lines.append("![3d](%s/%s)" % (base, project.asset(tag, "3d.png")))
     lines.append("")
-    lines.append("![board](%s/%s)" % (base, project.asset(tag, "board.png")))
+    lines.append("![pcb](%s/%s)" % (base, project.asset(tag, "pcb.png")))
     lines.append("")
-    if record.get("diff_from"):
-        diff = project.asset(tag, "diff-from-%s.pdf" % record["diff_from"])
-        lines.append("The board compared with %s, layer by layer: [%s](%s/%s)"
-            % (record["diff_from"], diff, base, diff))
+    diff_from = record.get("diff_from")
+    if log or diff_from:
+        lines.append("## Changes since %s" % since if since else "## Changes")
         lines.append("")
-    # GitHub makes this archive of the tagged commit itself, once the release is published;
-    # publishing refuses uncommitted builds, so it holds the board the files above show.
-    lines.append("The KiCad project, to open in KiCad without git: [%s.zip]"
-        "(https://github.com/%s/archive/refs/tags/%s.zip)" % (tag, repo, tag))
-    lines.append("")
+    if diff_from:
+        built = set(entry["name"] for entry in record["files"])
+        diff = project.asset(tag, "diff-from-%s.pdf" % diff_from)
+        lines.append("### Changes in PCB: [%s](%s/%s)" % (diff, base, diff))
+        lines.append("")
+        for suffix, _layers in DIFF_IMAGES:
+            name = project.asset(tag, "diff-from-%s-%s.png" % (diff_from, suffix))
+            if name in built:
+                lines.append("![%s changes](%s/%s)" % (suffix, base, name))
+                lines.append("")
+        lines.append("### Changes in project")
+        lines.append("")
     if log:
-        lines.append("## Changes")
-        lines.append("")
         lines.append(log)
+    elif diff_from:
+        lines.append("None.")
     return "\n".join(lines) + "\n"
 
 
@@ -974,13 +1002,13 @@ def do_build(project, tag, what, fab_changed=None):
             if previous:
                 jobs.append(partial(build_diff, project, outdir, tag, work, previous))
             results = parallel(jobs)
-            diff = results.pop() if previous else None
+            diffs = results.pop() if previous else None
             (zipped, digest), (image, layers), renders = results[:3]
             made = [zipped, image] + renders + results[5:] + [layers] + results[3:5]
-            if diff:
-                made.append(diff)
+            if diffs:
+                made += diffs
             path, record = write_build_json(project, outdir, tag, digest, scale, made,
-                previous if diff else None)
+                previous if diffs else None)
             made += [path, write_notes(project, outdir, tag, record, fab_changed)]
         for path in sorted(made):
             print("  %s  %d bytes" % (os.path.basename(path), os.path.getsize(path)))

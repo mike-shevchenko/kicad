@@ -321,8 +321,10 @@ def board_scale(pcb, work, remember=None):
 
 
 def outline_box(plotter, mirror):
-    """The board outline's box in the plotter's rasters."""
-    box = sharp(plotter.raster(CUT_LAYER, mirror, default_drill(CUT_LAYER))).getbbox()
+    """The board outline's box in the plotter's rasters, measured on an antialiased raster
+    whether the plotter antialiases or not, so that crops of one board agree between tools."""
+    plot = plotter.one(CUT_LAYER, mirror, default_drill(CUT_LAYER))
+    box = sharp(artwork(plot, plotter.density)).getbbox()
     if not box:
         die("the board outline plotted empty at scale %.4f, so the %s side cannot be cropped"
             % (plotter.scale, "back" if mirror else "front"))
