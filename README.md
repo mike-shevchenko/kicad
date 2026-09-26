@@ -6,7 +6,7 @@ Helper scripts and useful stuff for KiCad.
 
 Every tool runs through one launcher, as `ki VERB [ARGUMENTS]`; `ki --help` lists the verbs.
 Install its wrappers into any directory already on PATH, so `ki` works from any of cmd.exe,
-cygwin and git-bash:
+git-bash and MSYS2:
 
   python ki.py install C:/programs
 
