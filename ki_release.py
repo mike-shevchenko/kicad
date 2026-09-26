@@ -56,8 +56,9 @@ Building
 Publishing
 
   ki release --publish
-      Take what is already in the release directory and upload it as a draft release. It
-      builds nothing, so review the files first and publish the same bytes you reviewed.
+      Take the build for the next tag from the release directory and upload it as a draft
+      release; other directories there, a copy kept aside or an older build, are left alone.
+      It builds nothing, so review the files first and publish the same bytes you reviewed.
       Run it again after a rebuild and it refreshes that draft in place. It ends by printing
       the draft's page, to review it, and its edit page, to publish it.
 
@@ -1024,16 +1025,23 @@ def do_publish(project):
     """Upload what was built, as a draft. Nothing is tagged and nothing is pushed."""
     if not shutil.which("gh"):
         die("gh is not on PATH - install the GitHub CLI to publish")
+    # The build to publish is the one for the tag a build would get now, decided by the
+    # published tags as when building. Any other directory under release/ - a copy kept
+    # aside, an earlier build - is left alone, whatever it is named.
+    fetch_tags()
+    tag = next_tag(project.revision)
     root = os.path.join(project.root, "release")
-    if not os.path.isdir(root):
-        die("nothing built yet - run ki release first")
-    builds = [d for d in sorted(os.listdir(root))
-        if os.path.isfile(os.path.join(root, d, "build.json"))]
-    if not builds:
-        die("no complete build in %s - run ki release, not --png or --render" % shown(root))
-    tag = builds[-1]
-    outdir = os.path.join(root, tag)
+    outdir = release_dir(project.root, tag)
+    if not os.path.isfile(os.path.join(outdir, "build.json")):
+        builds = [entry for entry in sorted(os.listdir(root))
+            if os.path.isfile(os.path.join(root, entry, "build.json"))
+            ] if os.path.isdir(root) else []
+        die("no build for %s in %s - run ki release%s" % (tag, shown(root),
+            "; there is only %s" % ", ".join(builds) if builds else ""))
     record = json.load(open(os.path.join(outdir, "build.json"), encoding="utf-8"))
+    if record["tag"] != tag:
+        die("%s holds a build for %s, not for %s - rebuild" % (shown(outdir), record["tag"],
+            tag))
     if record["dirty"]:
         die("%s was built from uncommitted changes, so no commit holds the board its files"
             " show:\n          %s\n          Commit them, rebuild, then publish."
@@ -1049,9 +1057,6 @@ def do_publish(project):
         files.append(path)
     files.append(os.path.join(outdir, "build.json"))
 
-    fetch_tags()
-    if git("tag", "--list", tag, check=False):
-        die("tag %s already exists - that release is published, build the next one" % tag)
     standing = gh_json("release", "view", tag, "--json", "isDraft,url,assets")
     if standing and not standing["isDraft"]:
         die("%s is already published on GitHub, and this build would replace it.\n"
