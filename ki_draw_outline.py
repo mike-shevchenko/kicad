@@ -418,24 +418,35 @@ def factor_rows(pads, row_name_offset):
     return labels
 
 
-def emit_text(s, x, y, size, label_drop):
+def color_form(text):
+    """The (color R G B A) form KiCad stores for an opaque RRGGBB color."""
+    if not re.fullmatch(r"[0-9A-Fa-f]{6}", text):
+        raise argparse.ArgumentTypeError(
+            "%r is not a color; give it as hex RRGGBB, with no #" % text)
+    red, green, blue = (int(text[i:i + 2], 16) for i in range(0, 6, 2))
+    return "(color %d %d %d 1)" % (red, green, blue)
+
+
+def emit_text(s, x, y, size, label_drop, color=None):
     """Text centered on (x, y).
 
     KiCad centers schematic text on its anchor when no justification is
     given, so no manual offset is needed. `label_drop` is kept as a small
-    optional nudge downward, in font-size units.
+    optional nudge downward, in font-size units. With no color, the theme's applies.
     """
     ty = y + size * label_drop
+    tint = f'\t\t\t\t{color}\n' if color else ''
     return (f'\t(text "{s}"\n\t\t(exclude_from_sim no)\n'
         f'\t\t(at {x:.4f} {ty:.4f} 0)\n'
-        f'\t\t(effects\n\t\t\t(font\n\t\t\t\t(size {size} {size})\n\t\t\t)\n'
+        f'\t\t(effects\n\t\t\t(font\n\t\t\t\t(size {size} {size})\n{tint}\t\t\t)\n'
         f'\t\t)\n'
         f'\t\t(uuid "{uuid.uuid4()}")\n\t)\n')
 
 
-def emit(kind, pts, stroke_width):
+def emit(kind, pts, stroke_width, color=None):
     u = uuid.uuid4()
-    stroke = f'(stroke (width {stroke_width}) (type default))'
+    tint = f' {color}' if color else ''
+    stroke = f'(stroke (width {stroke_width}) (type default){tint})'
     if kind == "fp_circle":
         (cx, cy), (ex, ey) = pts[0], pts[1]
         r = math.hypot(ex - cx, ey - cy)
@@ -519,6 +530,9 @@ def main():
         "drawing each shape once")
     ap.add_argument("--stroke-width", default="0.15", metavar="MM",
         help="line width on the schematic (default: 0.15)")
+    ap.add_argument("--color", type=color_form, metavar="COLOR",
+        help="color of the outline and the pad numbers, as hex RRGGBB, e.g. C00000 "
+        "(default: theme's color for notes and graphics, usually dark blue)")
     if len(sys.argv) == 1:  # no arguments: show the help
         ap.print_help()
         return
@@ -644,12 +658,14 @@ def place(sheet, title, shapes, pads, args, note):
     else:
         tx, ty = off_page(sheet, max(ys) - min(ys))
 
-    body = emit_text(title, tx, title_y - cy + ty, args.font_size, args.label_drop)
+    body = emit_text(title, tx, title_y - cy + ty, args.font_size, args.label_drop, args.color)
     for kind, pts in shapes:
-        body += emit(kind, [(x - cx + tx, y - cy + ty) for x, y in pts], args.stroke_width)
+        body += emit(kind, [(x - cx + tx, y - cy + ty) for x, y in pts], args.stroke_width,
+            args.color)
 
     for name, x, y in labels:
-        body += emit_text(name, x - cx + tx, y - cy + ty, args.font_size, args.label_drop)
+        body += emit_text(name, x - cx + tx, y - cy + ty, args.font_size, args.label_drop,
+            args.color)
 
     sheet = sheet.rstrip()
     assert sheet.endswith(")")
