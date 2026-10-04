@@ -15,6 +15,8 @@ from ki_common_lib import die, exit_with, shown
 # it does. The module is imported only when its verb runs, so a tool that needs something
 # this Python lacks, such as pcbnew, keeps every other verb working.
 VERBS = (
+    ("change-font", "ki_change_font",
+        "change the font, size or thickness of every text that uses a given one"),
     ("cut-signature", "ki_cut_signature",
         "cut the pixel signature out of a filled polygon in a footprint"),
     ("diff", "ki_diff", "compare two versions of a board into a PDF: for git, Fork, or by hand"),
