@@ -9,7 +9,8 @@ import re
 import subprocess
 import tempfile
 
-from ki_common_lib import default_board, die, ensure_kicad_python, exit_with, help_formatter, note
+from ki_common_lib import (default_board, die, ensure_kicad_python, exit_with,
+    help_formatter, keep_backup, note)
 
 # pcbnew is imported lazily, inside the centering path only: --cmp is purely textual and has
 # to run under any Python, while --center needs KiCad's own interpreter.
@@ -34,7 +35,8 @@ Moving
 
   Any of these acts on --pcb, or on the only .kicad_pcb in the current directory. The whole
   board moves as one rigid body, origins included, so relative coordinates survive, and the
-  result is checked as below before the file is written. To center the board open in the
+  result is checked as below before the file is written; the file it replaces, the board or
+  --output, is kept alongside as .BAK. To center the board open in the
   PCB editor, run in its scripting console, naming the directory holding these scripts:
 
       import sys; sys.path.insert(0, "C:/github/public/kicad")
@@ -385,6 +387,7 @@ def move_file(path, output, choose_delta):
         baseline = os.path.join(work, "baseline.kicad_pcb")
         board.Save(baseline)
         delta = apply_delta(board, choose_delta(board, path))
+        keep_backup(output or path)
         board.Save(output or path)
         print("Moved by %+.3f, %+.3f mm." % (pcbnew.ToMM(delta.x), pcbnew.ToMM(delta.y)))
         dx, dy, problems, changed = compare(read_text(baseline), read_text(output or path))

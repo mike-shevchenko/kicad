@@ -41,6 +41,12 @@ def note(message):
     sys.stderr.write("[ki] " + message + "\n")
 
 
+def keep_backup(path):
+    """Copy a file about to be overwritten to PATH.BAK, replacing any earlier one."""
+    if os.path.isfile(path):
+        shutil.copyfile(path, path + ".BAK")
+
+
 def exit_with(main):
     """Every tool's entry point: run main, and report a Failure the way die() promises.
 

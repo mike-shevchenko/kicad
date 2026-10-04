@@ -8,6 +8,8 @@ instead of the background, and the pixel signature is added as filled pixels.
 KiCad polygons cannot have holes, so any hole left by inversion (the counters
 inside the letters) is resolved by splitting the polygon vertically through
 the hole until every piece is simply connected.
+
+An existing output file is kept alongside as .BAK before it is overwritten.
 """
 # Written with the help of Claude Opus 5.
 # Run as "ki invert-logo" through the ki launcher, or directly as "python ki_invert_logo.py".
@@ -17,7 +19,7 @@ import re
 import sys
 import uuid
 
-from ki_common_lib import die, exit_with, form_end, help_formatter
+from ki_common_lib import die, exit_with, form_end, help_formatter, keep_backup
 
 PIXEL = 0.15
 MARGIN = 1
@@ -145,6 +147,7 @@ def main():
         f'    (tstamp {uuid.uuid4()})\n  )\n'
         f'{body})\n')
 
+    keep_backup(dst)
     open(dst, "w", encoding="utf-8", newline="\n").write(out)
     print(f"{len(pieces)} polygon(s); extent "
         f"{maxx - minx:.3f} x {maxy - miny:.3f} mm")

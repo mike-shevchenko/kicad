@@ -10,7 +10,7 @@ import re
 import sys
 from collections import Counter
 
-from ki_common_lib import die, exit_with, help_formatter, shown
+from ki_common_lib import die, exit_with, help_formatter, keep_backup, shown
 
 DESCRIPTION = "Change the font, size or thickness of every text that uses a given one."
 
@@ -52,7 +52,7 @@ Matching
 
 Writing
 
-  Files are rewritten in place, with no backup, so commit first or keep git as the undo.
+  Files are rewritten in place, and each one's previous version is kept alongside as .BAK.
   Close them in KiCad first, or saving from there brings the old fonts back. Only the font
   lines change, and each file keeps its line endings. A board text in a TrueType font
   carries a cached outline; when that text changes, the stale cache is dropped and KiCad
@@ -266,6 +266,7 @@ def change_file(path, source, target, fonts_seen):
     if edits:
         for start, end, new in sorted(edits, reverse=True):
             text = text[:start] + new + text[end:]
+        keep_backup(path)
         open(path, "w", encoding="utf-8", newline="").write(text)
     return changed, unchanged, cached
 

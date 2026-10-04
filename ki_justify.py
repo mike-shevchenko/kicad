@@ -7,8 +7,7 @@ import os
 import re
 
 from ki_common_lib import (TextParser, default_board, die, ensure_kicad_python, exit_with,
-    form_end,
-    help_formatter, shown)
+    form_end, help_formatter, keep_backup, shown)
 
 DESCRIPTION = "Rejustify a text or field, shifting it so its position on the board is kept."
 
@@ -59,7 +58,8 @@ Why the position is kept
   coordinate already off the grid is not quietly pulled onto it.
 
   Only the two lines that must change are rewritten, so the diff stays small and the file's
-  own line endings, formatting and ordering survive untouched.
+  own line endings, formatting and ordering survive untouched. The previous version is kept
+  alongside as .BAK.
 
 When more than one matches
 
@@ -294,6 +294,7 @@ def main():
     body = text[spans[0][0]:spans[0][1]]
     new_body, error = rewrite(body, horizontal, vertical, anchor, args.snap)
     out = text[:spans[0][0]] + new_body + text[spans[0][1]:]
+    keep_backup(path)
     open(path, "wb").write(out.encode("utf-8"))
     print("%r: %s %s -> %s %s, anchor moved %+.4f, %+.4f mm."
         % (args.text, was[0], was[1], horizontal, vertical, shift[0], shift[1]))

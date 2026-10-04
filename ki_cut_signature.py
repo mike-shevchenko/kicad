@@ -12,6 +12,8 @@ KiCad polygons have no holes, so the cut is done in two parts:
     its outline directly, which preserves the existing keyhole structure;
   * the part of R that is not glyph is emitted as new polygons.
 The union of the two is the original shape minus the glyph.
+
+An existing output file is kept alongside as .BAK before it is overwritten.
 """
 # Written with the help of Claude Opus 5.
 # Run as "ki cut-signature" through the ki launcher, or directly as "python ki_cut_signature.py".
@@ -20,7 +22,7 @@ import argparse
 import re
 import uuid
 
-from ki_common_lib import die, exit_with, form_end, help_formatter
+from ki_common_lib import die, exit_with, form_end, help_formatter, keep_backup
 
 PIXEL = 0.15
 MARGIN = 1  # margin from the edges, in pixels
@@ -139,6 +141,7 @@ def main():
     assert out.endswith(")")
     out = out[:-1] + additions + ")\n"
 
+    keep_backup(dst)
     open(dst, "w", encoding="utf-8", newline="\n").write(out)
     print(f"glyph at ({g_left:.3f}, {g_top:.3f}) to ({g_right:.3f}, {g_bottom:.3f}); "
         f"{len(pieces)} added polygon(s)")

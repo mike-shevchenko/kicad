@@ -10,7 +10,8 @@ the PNG's own DPI metadata; set it in Photoshop via Image > Image Size >
 Resolution. 84.667 DPI gives 0.3 mm pixels, 101.6 DPI gives 0.25 mm.
 
 Horizontally adjacent pixels are merged into single rectangles, which keeps
-the file small without changing the geometry.
+the file small without changing the geometry. An existing output file is kept
+alongside as .BAK before it is overwritten.
 """
 # Written with the help of Claude Opus 5.
 # Run as "ki png2fp" through the ki launcher, or directly as "python ki_png2fp.py".
@@ -20,7 +21,7 @@ import argparse
 import os
 import uuid
 
-from ki_common_lib import exit_with, help_formatter
+from ki_common_lib import exit_with, help_formatter, keep_backup
 
 LAYER = "F.Mask"
 THRESHOLD = 128
@@ -64,6 +65,7 @@ def main():
     name = os.path.splitext(os.path.basename(path))[0]
     out_path = args.output or os.path.splitext(path)[0] + ".kicad_mod"
 
+    keep_backup(out_path)
     with open(out_path, "w", encoding="utf-8", newline="\n") as f:
         f.write(f'(footprint "{name}"\n')
         f.write("\t(version 20260206)\n")
