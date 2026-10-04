@@ -22,7 +22,7 @@ import argparse
 import re
 import uuid
 
-from ki_common_lib import die, exit_with, form_end, help_formatter, keep_backup
+from ki_common_lib import die, exit_with, form_end, help_formatter, keep_backup, shown
 
 PIXEL = 0.15
 MARGIN = 1  # margin from the edges, in pixels
@@ -117,10 +117,19 @@ def main():
     g_top = g_bottom - gh
 
     # 1. notch R out of the outline
-    corner = next(i for i, p in enumerate(ring)
-        if abs(p[0] - right) < 1e-6 and abs(p[1] - bottom) < 1e-6)
-    prev = ring[corner - 1]
+    def on_ring(x, y):
+        return next((i for i, p in enumerate(ring)
+            if abs(p[0] - x) < 1e-6 and abs(p[1] - y) < 1e-6), None)
+
     detour = [(right, g_top), (g_left, g_top), (g_left, bottom)]
+    corner = on_ring(right, bottom)
+    if corner is None:
+        if all(on_ring(x, y) is not None for x, y in detour):
+            die("%s already has the signature cut into it; give the footprint it was made from"
+                % shown(src))
+        die("the largest polygon in %s has no square corner at its bottom right, (%.3f, %.3f),"
+            " for the glyph to be cut into" % (shown(src), right, bottom))
+    prev = ring[corner - 1]
     if abs(prev[0] - right) > 1e-6:  # arrived along the bottom edge
         detour.reverse()
     new_ring = ring[:corner] + detour + ring[corner + 1:]
