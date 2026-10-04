@@ -81,7 +81,7 @@ class Font:
         self.name, self.width, self.height, self.thickness = name, width, height, thickness
 
     def __str__(self):
-        out = self.name or ""
+        out = f"{self.name!r}" if self.name else ""
         if self.width is not None:
             out += "@" + number(self.width)
             if not same(self.width, self.height):
